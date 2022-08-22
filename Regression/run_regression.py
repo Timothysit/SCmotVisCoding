@@ -206,6 +206,10 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
     id_to_grating_orientations = exp_data['_gratingIdDirections']
     grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
 
+    pupil_size = exp_data['_pupilSizeVis'].flatten()  # size : (nTimePoints, )
+    # TODO: use a smoothing imputation method instead
+    pupil_size[np.isnan(pupil_size)] = np.nanmean(pupil_size)
+
     if check_for_nans:
         if np.sum(np.isnan(neural_activity)) > 0:
             print('Detected NaNs, assuming this is along the time dimension and removing time frames with NaNs')
@@ -508,6 +512,10 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             # For each
 
             pdb.set_trace()
+        elif feature_name == 'pupil_size':
+
+            feature_mat = pupil_size.reshape(-1, 1)
+
 
         else:
             print('%s is not a valid feature name' % feature_name)
@@ -867,6 +875,10 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     vis_aligned_var_explained = sklmetrics.explained_variance_score(Y_vis_aligned_flattened, Y_hat_vis_aligned_flattened, multioutput='raw_values')
     saccade_aligned_var_explained = sklmetrics.explained_variance_score(Y_saccade_aligned_flattened, Y_hat_saccade_aligned_flattened, multioutput='raw_values')
 
+    regression_result['Y_hat_vis_aligned'] = Y_hat_vis_aligned
+    regression_result['Y_vis_aligned'] = Y_vis_aligned
+    regression_result['Y_hat_saccade_aligned'] = Y_hat_saccade_aligned
+    regression_result['Y_saccade_aligned'] = Y_saccade_aligned
     regression_result['vis_aligned_var_explained'] = vis_aligned_var_explained
     regression_result['saccade_aligned_var_explained'] = saccade_aligned_var_explained
 
@@ -1037,12 +1049,41 @@ def get_num_saccade_per_grating(vis_exp_saccade_onset_times, grating_onset_times
 
     return num_saccade_per_grating
 
+
+def plot_pupil_data(exp_data, exp_time_var_name='_windowVis', pupil_size_var_name='_pupilSizeVis', fig=None, ax=None):
+    """
+    Parameters
+    ----------
+    exp_data : dict
+    fig : matplotlib figure object
+    ax : matplotlib axis object
+
+    Returns
+    -------
+    fig : matplotlib figure object
+    ax : matplotlib axis object
+    """
+
+    if (fig is None) and (ax is None):
+        fig, ax = plt.subplots()
+        fig.set_size_inches(12, 3)
+
+    pupil_size = exp_data[pupil_size_var_name].flatten()
+    exp_time = exp_data[exp_time_var_name].flatten()
+    ax.plot(exp_time, pupil_size, lw=0.5, color='black')
+    ax.set_xlabel('Time (seconds)', size=11)
+    ax.set_ylabel('Pupil size', size=11)
+
+    return fig, ax
+
+
 def main():
 
     available_processes = ['load_data', 'plot_data', 'fit_regression_model', 'plot_regression_model_explained_var',
-                           'plot_regression_model_example_neurons', 'compare_iterative_vs_normal_fit']
+                           'plot_regression_model_example_neurons', 'compare_iterative_vs_normal_fit',
+                           'plot_pupil_data']
 
-    processes_to_run = ['compare_iterative_vs_normal_fit']
+    processes_to_run = ['fit_regression_model']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -1061,7 +1102,7 @@ def main():
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             file_types_to_load=['_windowVis', '_windowGray', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
-                                '_saccadeIntervalsVis'],
+                                '_saccadeIntervalsVis', '_pupilSizeVis'],
             X_sets_to_compare={'bias_only': ['bias'],
                                'vis_on_only': ['bias', 'vis_on'],
                                'vis_ori': ['bias', 'vis_ori'],
@@ -1069,6 +1110,7 @@ def main():
                                # 'vis': ['bias', 'vis_on', 'vis_dir'],
                                'saccade_on_only': ['bias', 'saccade_on'],
                                'saccade': ['bias', 'saccade_on', 'saccade_dir'],
+                               # 'pupil_size_only': ['bias', 'pupil_size'],
                                # 'vis_and_saccade': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir'],
                                # 'vis_on_and_saccade_on': ['bias', 'vis_on', 'saccade_on'],
                                # 'vis_on_and_saccade_on_and_interaction': ['bias', 'vis_on', 'saccade_on',
@@ -1076,7 +1118,8 @@ def main():
                                },
             feature_time_windows={'vis_on': [-1.0, 3.0], 'vis_dir': [-1.0, 3.0], 'vis_ori': [-1.0, 3.0],
                                   'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0],
-                                  'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0]},
+                                  'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0],
+                                  'pupil_size': None},
             dataset='grating',
             neural_preprocessing_steps=['zscore'],  # 'zscore' is optional
         ),
@@ -1249,6 +1292,12 @@ def main():
                 exp_regression_result['Y_test'] = regression_result['Y_test_per_cv_set']
                 exp_regression_result['vis_aligned_var_explained'] = vis_aligned_explained_var_per_X_set
                 exp_regression_result['saccade_aligned_var_explained'] = saccade_aligned_explained_var_per_X_set
+
+                exp_regression_result['Y_hat_vis_aligned'] = regression_result['Y_hat_vis_aligned']
+                exp_regression_result['Y_vis_aligned'] = regression_result['Y_vis_aligned']
+                exp_regression_result['Y_hat_saccade_aligned'] = regression_result['Y_hat_saccade_aligned']
+                exp_regression_result['Y_saccade_aligned'] = regression_result['Y_saccade_aligned']
+
                 # if exp_id == 'SS047_2015-12-03':
                 #     pdb.set_trace()
 
@@ -1763,13 +1812,17 @@ def main():
 
         if process == 'plot_pupil_data':
 
-
+            fig_folder = process_params[process]['fig_folder']
             data = load_data(data_folder=process_params[process]['data_folder'],
                              file_types_to_load=process_params[process]['file_types_to_load'])
 
             for exp_id, exp_data in data.items():
 
-                fig, ax = plot_pupil_data(data)
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, ax = plot_pupil_data(exp_data)
+
+                    fig_name = '%s_pupil_trace' % (exp_id)
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
 
 
 
