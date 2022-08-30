@@ -67,7 +67,11 @@ def load_data(data_folder, file_types_to_load=['_windowVis'],
         for file_type in file_types_to_load:
 
             file_paths = glob.glob(os.path.join(data_folder, '%s*%s*.npy' % (file_type, exp_id)))
-            assert len(file_paths) == 1
+
+            if len(file_paths) != 1:
+                print('0 or more than 1 path found, please debug')
+                pdb.set_trace()
+
             file_data = np.load(file_paths[0])
             data[exp_id][file_type] = file_data
 
@@ -146,28 +150,107 @@ def plot_grating_exp_data(exp_data, zscore_activity=False, fig=None, axs=None,
     return fig, axs
 
 
-def get_vis_and_saccade_times(exp_data):
+def get_vis_and_saccade_times(exp_data, exp_type='grating', exclude_saccade_on_vis_exp=False):
+    """
+    Parameters
+    ----------
+    exp_data : dict
+    exp_type : str
+        type of experiment
+    """
 
-    vis_exp_times = exp_data['_windowVis'].flatten()
+    if exp_type == 'grating':
+        exp_times = exp_data['_windowVis'].flatten()
+        neural_activity = exp_data['_tracesVis']
+        grating_intervals = exp_data['_gratingIntervals']
+        vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
+        exp_saccade_onset_times = exp_times[vis_exp_saccade_intervals[:, 0]]
+        saccade_dirs = exp_data['_saccadeVisDir'].flatten()
+        saccade_dirs[saccade_dirs == 0] = -1
+        grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
+        id_to_grating_orientations = exp_data['_gratingIdDirections']
+        grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+        pupil_size = exp_data['_pupilSizeVis'].flatten()  # size : (nTimePoints, )
+        # TODO: use a smoothing imputation method instead
+        pupil_size[np.isnan(pupil_size)] = np.nanmean(pupil_size)
 
-    grating_intervals = exp_data['_gratingIntervals']
-    grating_onset_times = grating_intervals[:, 0]
-    vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
-    vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_intervals[:, 0]]
-    saccade_dirs = exp_data['_saccadeVisDir'].flatten()
-    saccade_dirs[saccade_dirs == 0] = -1
+        grating_onset_times = grating_intervals[:, 0]
 
-    grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
-    id_to_grating_orientations = exp_data['_gratingIdDirections']
-    grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+    elif exp_type == 'gray':
 
-    return vis_exp_times, vis_exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial
+        exp_times = exp_data['_windowGray'].flatten()
+        neural_activity = exp_data['_tracesGray']
+        exp_saccade_intervals = exp_data['_onsetOffset'].astype(int)
+        exp_saccade_onset_times = exp_times[exp_saccade_intervals[:, 0]]
+
+        gray_exp_saccade_dirs = exp_data['_trial_Dir'].flatten()
+        gray_exp_saccade_dirs[gray_exp_saccade_dirs == 0] = -1
+        saccade_dirs = gray_exp_saccade_dirs
+
+        grating_onset_times = np.array([])
+        grating_orientation_per_trial = np.array([])
+        # TODO: do pupil size
+
+
+    elif exp_type == 'both':
+
+        # Neural activity
+        vis_exp_neural_activity = exp_data['_tracesVis']
+        gray_exp_neural_activity = exp_data['_tracesGray']
+
+        neural_activity = np.concatenate([vis_exp_neural_activity, gray_exp_neural_activity], axis=0)
+
+        # Times
+
+        vis_exp_times = exp_data['_windowVis'].flatten()
+        gray_exp_times = exp_data['_windowGray'].flatten()
+        gray_exp_times_w_offset = gray_exp_times + vis_exp_times[-1]
+        exp_times = np.concatenate([vis_exp_times, gray_exp_times_w_offset])
+
+        # Saccade
+        vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
+        vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_intervals[:, 0]]
+
+        gray_exp_saccade_intervals = exp_data['_onsetOffset'].astype(int)
+        gray_exp_saccade_onset_times = gray_exp_times[gray_exp_saccade_intervals[:, 0]]
+        gray_exp_saccade_onset_times_w_offset = gray_exp_saccade_onset_times + vis_exp_times[-1]
+
+        if exclude_saccade_on_vis_exp:
+            exp_saccade_onset_times = gray_exp_saccade_onset_times_w_offset
+        else:
+            exp_saccade_onset_times = np.concatenate([vis_exp_saccade_onset_times,
+                                                  gray_exp_saccade_onset_times_w_offset])
+
+        vis_saccade_dirs = exp_data['_saccadeVisDir'].flatten()
+        vis_saccade_dirs[vis_saccade_dirs == 0] = -1
+        gray_exp_saccade_dirs = exp_data['_trial_Dir'].flatten()
+        gray_exp_saccade_dirs[gray_exp_saccade_dirs == 0] = -1
+
+        if exclude_saccade_on_vis_exp:
+            saccade_dirs = gray_exp_saccade_dirs
+        else:
+            saccade_dirs = np.concatenate([vis_saccade_dirs, gray_exp_saccade_dirs])
+
+
+        # Grating
+        grating_intervals = exp_data['_gratingIntervals']
+        grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
+        id_to_grating_orientations = exp_data['_gratingIdDirections']
+        grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+        grating_onset_times = grating_intervals[:, 0]
+
+    else:
+        print('WARNING: no valid exp_type specified')
+
+    return exp_times, exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial
+
 
 def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir'],
                             feature_time_windows={'vis_on': [-1.0, 3.0], 'vis_dir': [-1.0, 3.0], 'vis_ori': [-1.0, 3.0],
                                                   'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0],
                                                   'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0]},
-                            neural_preprocessing_steps=['zscore'], check_for_nans=True,
+                            neural_preprocessing_steps=['zscore'], check_for_nans=True, exp_type='grating',
+                            exclude_saccade_on_vis_exp=False,
                             train_indices=None, test_indices=None):
     """
     Make feature matrix (or design matrix) X and target matrix Y from experiment data
@@ -192,39 +275,113 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
     """
 
+    if exp_type == 'grating':
+        vis_exp_times = exp_data['_windowVis'].flatten()
+        exp_times = exp_data['_windowVis'].flatten()
+        neural_activity = exp_data['_tracesVis']
+        grating_intervals = exp_data['_gratingIntervals']
+        grating_onset_times = grating_intervals[:, 0]
+        vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
+        exp_saccade_onset_times = exp_times[vis_exp_saccade_intervals[:, 0]]
+        saccade_dirs = exp_data['_saccadeVisDir'].flatten()
+        saccade_dirs[saccade_dirs == 0] = -1
+        grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
+        id_to_grating_orientations = exp_data['_gratingIdDirections']
+        grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+        pupil_size = exp_data['_pupilSizeVis'].flatten()  # size : (nTimePoints, )
+        # TODO: use a smoothing imputation method instead
+        pupil_size[np.isnan(pupil_size)] = np.nanmean(pupil_size)
+    elif exp_type == 'gray':
+        vis_exp_times = exp_data['_windowVis'].flatten()
+        exp_times = exp_data['_windowGray'].flatten()
+        neural_activity = exp_data['_tracesGray']
+        exp_saccade_intervals = exp_data['_onsetOffset'].astype(int)
+        exp_saccade_onset_times = exp_times[exp_saccade_intervals[:, 0]]
+        gray_exp_saccade_dirs = exp_data['_trial_Dir'].flatten()
+        gray_exp_saccade_dirs[gray_exp_saccade_dirs == 0] = -1
+        saccade_dirs = gray_exp_saccade_dirs
+        grating_onset_times = []
+        grating_orientation_per_trial = []
 
-    vis_exp_times = exp_data['_windowVis'].flatten()
-    neural_activity = exp_data['_tracesVis']
+    elif exp_type == 'both':
 
-    grating_intervals = exp_data['_gratingIntervals']
-    vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
-    vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_intervals[:, 0]]
-    saccade_dirs = exp_data['_saccadeVisDir'].flatten()
-    saccade_dirs[saccade_dirs == 0] = -1
+        # Neural activity
+        vis_exp_neural_activity = exp_data['_tracesVis']
+        gray_exp_neural_activity = exp_data['_tracesGray']
 
-    grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
-    id_to_grating_orientations = exp_data['_gratingIdDirections']
-    grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+        neural_activity = np.concatenate([vis_exp_neural_activity, gray_exp_neural_activity], axis=0)
 
-    pupil_size = exp_data['_pupilSizeVis'].flatten()  # size : (nTimePoints, )
-    # TODO: use a smoothing imputation method instead
-    pupil_size[np.isnan(pupil_size)] = np.nanmean(pupil_size)
+        # Times
+        vis_exp_times = exp_data['_windowVis'].flatten()
+        gray_exp_times = exp_data['_windowGray'].flatten()
+
+        one_sample_time = np.mean(np.diff(vis_exp_times))
+        gray_exp_start_time = gray_exp_times[0]
+
+        gray_exp_times_w_offset = gray_exp_times + vis_exp_times[-1] + one_sample_time - gray_exp_start_time
+        exp_times = np.concatenate([vis_exp_times, gray_exp_times_w_offset])
+
+        # Saccade
+        vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis'].astype(int)
+        vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_intervals[:, 0]]
+
+        gray_exp_saccade_intervals = exp_data['_onsetOffset'].astype(int)
+        gray_exp_saccade_onset_times = gray_exp_times[gray_exp_saccade_intervals[:, 0]]
+        gray_exp_saccade_onset_times_w_offset = gray_exp_saccade_onset_times + vis_exp_times[-1] + one_sample_time - gray_exp_start_time
+
+        if exclude_saccade_on_vis_exp:
+            exp_saccade_onset_times = gray_exp_saccade_onset_times_w_offset
+        else:
+            exp_saccade_onset_times = np.concatenate([vis_exp_saccade_onset_times,
+                                                      gray_exp_saccade_onset_times_w_offset])
+
+        vis_saccade_dirs = exp_data['_saccadeVisDir'].flatten()
+        vis_saccade_dirs[vis_saccade_dirs == 0] = -1
+        gray_exp_saccade_dirs = exp_data['_trial_Dir'].flatten()
+        gray_exp_saccade_dirs[gray_exp_saccade_dirs == 0] = -1
+        if exclude_saccade_on_vis_exp:
+            saccade_dirs = gray_exp_saccade_dirs
+        else:
+            saccade_dirs = np.concatenate([vis_saccade_dirs, gray_exp_saccade_dirs])
+
+
+        # Grating
+        grating_intervals = exp_data['_gratingIntervals']
+        grating_onset_times = grating_intervals[:, 0]
+        grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
+        id_to_grating_orientations = exp_data['_gratingIdDirections']
+        grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in grating_id_per_trial]
+
+        # Pupil size
+        vis_exp_pupil_size = exp_data['_pupilSizeVis'].flatten()  # size : (nTimePoints, )
+        # TODO: use a smoothing imputation method instead
+        vis_exp_pupil_size[np.isnan(vis_exp_pupil_size)] = np.nanmean(vis_exp_pupil_size)
+
+        gray_exp_pupil_size = exp_data['_pupilSizeGray'].flatten()
+        gray_exp_pupil_size[np.isnan(gray_exp_pupil_size)] = np.nanmean(gray_exp_pupil_size)
+
+        pupil_size = np.concatenate([vis_exp_pupil_size, gray_exp_pupil_size])
+
+    else:
+        print('WARNING: no valid exp_type specified')
+
+    # print('Min np.diff(exp_times) %.4f' % np.min(np.diff(exp_times)))
+    # print('Max np.diff(exp_times) %.4f' % np.max(np.diff(exp_times)))
 
     if check_for_nans:
         if np.sum(np.isnan(neural_activity)) > 0:
             print('Detected NaNs, assuming this is along the time dimension and removing time frames with NaNs')
             subset_time_frame = ~np.isnan(np.sum(neural_activity, axis=1))
             neural_activity = neural_activity[subset_time_frame, :]
-            vis_exp_times = vis_exp_times[subset_time_frame]
+            exp_times = exp_times[subset_time_frame]
 
-    sec_per_time_samples = np.mean(np.diff(vis_exp_times))
-    num_time_samples = int(len(vis_exp_times))
+    sec_per_time_samples = np.mean(np.diff(exp_times))
+    num_time_samples = int(len(exp_times))
 
     # Make target matrix Y
     Y = neural_activity
     if 'zscore' in neural_preprocessing_steps:
         Y  = (Y - np.mean(Y, axis=0)) / np.std(Y, axis=0)
-
 
     # Make X
     feature_matrices = []
@@ -241,18 +398,21 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             feature_mat = np.zeros((num_time_samples, num_sample_in_window))
             col_idx = np.arange(0, num_sample_in_window)
 
-            grating_onset_times = grating_intervals[:, 0]
+            # grating_onset_times = grating_intervals[:, 0]
             # grating_offset_times = grating_intervals[:, 1]
 
-            subset_onset_time = grating_onset_times[
-                (grating_onset_times + feature_time_window[1]) < vis_exp_times[-1]
-                ]
+            if len(grating_onset_times) != 0:
+                subset_onset_time = grating_onset_times[
+                    (grating_onset_times + feature_time_window[1]) < vis_exp_times[-1]
+                    ]
+            else:
+                subset_onset_time = []
 
             for onset_time in subset_onset_time:
 
                 # onset_sample = np.argmin(np.abs(vis_exp_times - onset_time))
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 if len(row_idx) > len(col_idx):
@@ -267,18 +427,18 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             feature_mat = np.zeros((num_time_samples, num_sample_in_window))
             col_idx = np.arange(0, num_sample_in_window)
 
-            grating_onset_times = grating_intervals[:, 0]
+            # grating_onset_times = grating_intervals[:, 0]
             # grating_offset_times = grating_intervals[:, 1]
 
             subset_onset_time = grating_onset_times[
-                (grating_onset_times + feature_time_window[1]) < vis_exp_times[-1]
+                (grating_onset_times + feature_time_window[1]) < exp_times[-1]
                 ]
 
             for n_trial, onset_time in enumerate(subset_onset_time):
 
                 # onset_sample = np.argmin(np.abs(vis_exp_times - onset_time))
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 if len(row_idx) > len(col_idx):
@@ -303,17 +463,22 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             num_time_sample_per_ori = int((feature_time_window[1] - feature_time_window[0]) / sec_per_time_samples)
             num_sample_in_window = num_time_sample_per_ori * num_unique_ori
             feature_mat = np.zeros((num_time_samples, num_sample_in_window))
-            grating_onset_times = grating_intervals[:, 0]
+            # grating_onset_times = grating_intervals[:, 0]
             # grating_offset_times = grating_intervals[:, 1]
 
-            subset_trial_idx = np.where((grating_onset_times + feature_time_window[1]) < vis_exp_times[-1])[0]
+            # Note we still use vis exp times here because the vis and gray screen experiments are not truncated exactly
+            # one after another ... there is some emtpy time in between... not sure if that matters
+            if len(grating_onset_times) != 0:
+                subset_trial_idx = np.where((grating_onset_times + feature_time_window[1]) < vis_exp_times[-1])[0]
+            else:
+                subset_trial_idx = []
 
             for n_trial, trial_idx in enumerate(subset_trial_idx):
 
                 onset_time = grating_onset_times[trial_idx]
                 # onset_sample = np.argmin(np.abs(vis_exp_times - onset_time))
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 # Grating direction
@@ -337,15 +502,15 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             feature_mat = np.zeros((num_time_samples, num_sample_in_window))
             col_idx = np.arange(0, num_sample_in_window)
 
-            subset_vis_exp_saccade_onset_times = vis_exp_saccade_onset_times[
-                (vis_exp_saccade_onset_times + feature_time_window[1] < vis_exp_times[-1]) &
-                (vis_exp_saccade_onset_times + feature_time_window[0] > vis_exp_times[0])
+            subset_exp_saccade_onset_times = exp_saccade_onset_times[
+                (exp_saccade_onset_times + feature_time_window[1] < exp_times[-1]) &
+                (exp_saccade_onset_times + feature_time_window[0] > exp_times[0])
                 ]
 
-            for n_saccade_time, onset_time in enumerate(subset_vis_exp_saccade_onset_times):
+            for n_saccade_time, onset_time in enumerate(subset_exp_saccade_onset_times):
 
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 if len(row_idx) > len(col_idx):
@@ -360,19 +525,19 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             feature_mat = np.zeros((num_time_samples, num_sample_in_window))
             col_idx = np.arange(0, num_sample_in_window)
 
-            subset_vis_exp_saccade_onset_times = vis_exp_saccade_onset_times[
-                (vis_exp_saccade_onset_times + feature_time_window[1] < vis_exp_times[-1]) &
-                (vis_exp_saccade_onset_times + feature_time_window[0] > vis_exp_times[0])
+            subset_exp_saccade_onset_times = exp_saccade_onset_times[
+                (exp_saccade_onset_times + feature_time_window[1] < exp_times[-1]) &
+                (exp_saccade_onset_times + feature_time_window[0] > exp_times[0])
                 ]
 
-            for n_saccade_time, onset_time in enumerate(subset_vis_exp_saccade_onset_times):
+            for n_saccade_time, onset_time in enumerate(subset_exp_saccade_onset_times):
 
-                if onset_time + feature_time_window[1] > vis_exp_times[-1]:
+                if onset_time + feature_time_window[1] > exp_times[-1]:
                     print('onset time exceeds experiment time, skipping')
                     continue
 
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 if len(row_idx) > len(col_idx):
@@ -390,17 +555,17 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
             saccade_binary_vector = np.zeros((num_time_samples, ))
 
-            for n_saccade_time, onset_time in enumerate(vis_exp_saccade_onset_times):
+            for n_saccade_time, onset_time in enumerate(exp_saccade_onset_times):
 
-                if onset_time + feature_time_window[1] > vis_exp_times[-1]:
+                if onset_time + feature_time_window[1] > exp_times[-1]:
                     print('onset time exceeds experiment time, skipping')
                     continue
-                if onset_time + feature_time_window[0] < vis_exp_times[0]:
+                if onset_time + feature_time_window[0] < exp_times[0]:
                     print('onset time is lower than experiment start time, skipping')
                     continue
 
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
                 saccade_binary_vector[row_idx] = 1
 
@@ -421,13 +586,13 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
             for onset_time in grating_onset_times:
 
-                if onset_time + feature_time_window[1] > vis_exp_times[-1]:
+                if onset_time + feature_time_window[1] > exp_times[-1]:
                     print('onset time exceeds experiment time, skipping')
                     continue
 
                 # onset_sample = np.argmin(np.abs(vis_exp_times - onset_time))
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 row_idx = np.arange(start_sample, end_sample)
 
                 if len(row_idx) > len(col_idx):
@@ -454,7 +619,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             grating_onset_times = grating_intervals[:, 0]
             # grating_offset_times = grating_intervals[:, 1]
 
-            subset_trial_idx = np.where((grating_onset_times + feature_time_window[1]) < vis_exp_times[-1])[0]
+            subset_trial_idx = np.where((grating_onset_times + feature_time_window[1]) < exp_times[-1])[0]
             grating_onset_times_subset = grating_onset_times[subset_trial_idx]
             grating_orientation_per_trial_subset = grating_orientation_per_trial[subset_trial_idx]
 
@@ -463,8 +628,8 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
             for n_onset, onset_time in enumerate(grating_onset_times_subset):
 
-                start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                 subset_idx = np.arange(start_sample, end_sample)
                 if len(subset_idx) > num_time_sample_per_ori:
                     subset_idx = subset_idx[0:num_time_sample_per_ori]
@@ -472,7 +637,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
                 Y_aligned_to_vis_onset[:, :, n_onset] = Y[subset_idx, :]
 
             for train_idx_set in train_indices:
-                train_supported_time = vis_exp_times[train_idx_set]
+                train_supported_time = exp_times[train_idx_set]
                 orientation_activity_matrix = np.zeros((num_time_sample_per_ori, num_neurons, num_unique_ori))
                 train_trial_idx = np.where(
                     (grating_onset_times_subset >= train_supported_time[0]) &
@@ -491,7 +656,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
                 # np.save(temp_save_path, orientation_activity_matrix)
 
             for test_idx_set in test_indices:
-                train_supported_time = vis_exp_times[test_idx_set]
+                train_supported_time = exp_times[test_idx_set]
                 orientation_activity_matrix = np.zeros((num_time_sample_per_ori, num_neurons, num_unique_ori))
                 train_trial_idx = np.where(
                     (grating_onset_times_subset >= train_supported_time[0]) &
@@ -522,9 +687,10 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
         feature_matrices.append(feature_mat)
 
-    X = np.concatenate(feature_matrices, axis=1)
-
-
+    try:
+        X = np.concatenate(feature_matrices, axis=1)
+    except:
+        pdb.set_trace()
 
     return X, Y
 
@@ -705,7 +871,8 @@ def get_ori_train_test_data(exp_data, time_window,
 
 
 def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half', n_cv_folds=10,
-                         custom_train_indices=None, custom_test_indices=None):
+                         custom_train_indices=None, custom_test_indices=None,
+                         performance_metrics=['explained_variance', 'r2']):
     """
     Fits regression model
 
@@ -721,6 +888,8 @@ def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half
         how to do train-test split
     n_cv_folds : int
         number of cross-validation folds to do
+    performance_metrics : list of str
+        list of performance metrics to use
     Returns
     -------
     regression_result : dict
@@ -746,8 +915,19 @@ def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half
 
 
     elif train_test_split_method == 'n_fold_cv':
-        print('TODO: set up n-fold cross validation')
+        num_time_points = np.shape(Y)[0]
+        window_partition_points = np.linspace(0, num_time_points, n_cv_folds+1).astype(int)
+        start_indices = window_partition_points[0:n_cv_folds]
+        end_indices = window_partition_points[1:n_cv_folds+1]
+        all_partition_time_indices = [np.arange(x, y) for (x, y) in zip(start_indices, end_indices)]
 
+        train_indices = []
+        test_indices = []
+        for partition_to_exclude in np.arange(0, n_cv_folds):
+            train_indices.append(
+                np.concatenate([x for (n_part, x) in enumerate(all_partition_time_indices) if n_part != partition_to_exclude])
+            )
+            test_indices.append(all_partition_time_indices[partition_to_exclude])
 
     if model_type == 'Ridge':
         model = sklinear.Ridge(alpha=1.0, fit_intercept=False)
@@ -755,6 +935,10 @@ def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half
     num_cv_set = len(train_indices)
     num_neurons = np.shape(Y)[1]
     explained_variance_per_cv_set = np.zeros((num_neurons, num_cv_set))
+
+    if 'r2' in performance_metrics:
+        r2_per_cv_set = np.zeros((num_neurons, num_cv_set))
+
     Y_test_hat_per_cv_set = []
     Y_test_per_cv_set = []
     test_idx_per_set = []
@@ -773,25 +957,44 @@ def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half
         explained_variance_per_cv_set[:, n_cv_set] = explained_variance
         test_idx_per_set.append(test_idx)
 
+        if 'r2' in performance_metrics:
+            r2 = sklmetrics.r2_score(y_true=Y_test, y_pred=Y_test_hat, multioutput='raw_values')
+            r2_per_cv_set[:, n_cv_set] = r2
+
+
     regression_result['X'] = X
     regression_result['Y'] = Y
     regression_result['test_idx_per_cv_set'] = np.array(test_idx_per_set)
     regression_result['Y_test_hat_per_cv_set'] = Y_test_hat_per_cv_set
     regression_result['explained_variance_per_cv_set'] = explained_variance_per_cv_set
+
+    if 'r2' in performance_metrics:
+        regression_result['r2_per_cv_set'] = r2_per_cv_set
+
+
     regression_result['Y_test_per_cv_set'] = np.array(Y_test_per_cv_set)
 
     return regression_result
 
 
-def get_aligned_explained_variance(regression_result, exp_data, alignment_time_window=[0, 3]):
+def get_aligned_explained_variance(regression_result, exp_data, alignment_time_window=[0, 3],
+                                   performance_metrics=['explained_variance', 'r2'],
+                                   exp_type='grating', exclude_saccade_on_vis_exp=False):
     """
+    Parameters
+    ----------
     regression_result : dict
         dictionary containing regression results, it should have the following keys
         'Y_test_per_cv_set' : list of numpy arrays
         'test_idx_per_cv_set' : list of numpy arrays
-
     exp_data : dict
         dictionary containing all used experiment data
+    performance_metrics : list
+
+    Returns
+    -------
+    regression_result : dict
+
     """
 
     # Get the fitted activity matrix for the entire time trace
@@ -801,7 +1004,7 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     test_idx_per_cv_set = regression_result['test_idx_per_cv_set']
 
     vis_exp_times, vis_exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial = get_vis_and_saccade_times(
-        exp_data)
+        exp_data, exp_type=exp_type, exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp)
 
     subset_vis_exp_vis_onset_times = grating_onset_times[
         (grating_onset_times + alignment_time_window[1] < vis_exp_times[-1]) &
@@ -814,15 +1017,20 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
         ]
 
     num_time_points = len(vis_exp_times)
-    num_neurons = np.shape(Y_test_per_cv_set)[2]
+    num_neurons = np.shape(Y_test_per_cv_set[0])[1]
+
     Y_hat = np.zeros((num_time_points, num_neurons)) + np.nan
 
     for n_cv, test_idx in enumerate(test_idx_per_cv_set):
-        Y_hat[test_idx, :] = Y_test_hat_per_cv_set[n_cv, :, :]
+        # deal with either unequal time points per cv set or same number
+        if Y_test_hat_per_cv_set.ndim == 1:
+            Y_hat[test_idx, :] = Y_test_hat_per_cv_set[n_cv]
+        else:
+            Y_hat[test_idx, :] = Y_test_hat_per_cv_set[n_cv, :, :]
 
     if np.sum(np.isnan(Y_hat)) != 0:
         print('Something wrong with getting Y_hat, found: %.f nans' % (np.sum(np.isnan(Y_hat))))
-        Y_hat[np.isnan(Y_hat)] = np.mean(Y_hat)
+        Y_hat[np.isnan(Y_hat)] = np.nanmean(Y_hat)
         # pdb.set_trace()
 
     num_saccades = len(subset_vis_exp_saccade_onset_times)
@@ -830,16 +1038,23 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
 
     sec_per_time_samples = np.mean(np.diff(vis_exp_times))
     num_aligned_time_points = int((alignment_time_window[1] - alignment_time_window[0]) / sec_per_time_samples)
-    num_trials_to_get = np.min([num_saccades, num_grating_presentations])
+
+    if exp_type == 'gray':
+        num_trials_to_get = num_saccades
+    else:
+        num_trials_to_get = np.min([num_saccades, num_grating_presentations])
 
     Y_hat_vis_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
     Y_vis_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
     Y_hat_saccade_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
     Y_saccade_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
 
-    subset_vis_on_times = np.random.choice(subset_vis_exp_vis_onset_times, num_trials_to_get)
-    subset_saccade_on_times = np.random.choice(subset_vis_exp_saccade_onset_times, num_trials_to_get)
-
+    if exp_type == 'gray':
+        subset_vis_on_times = []
+        subset_saccade_on_times = subset_vis_exp_saccade_onset_times
+    else:
+        subset_vis_on_times = np.random.choice(subset_vis_exp_vis_onset_times, num_trials_to_get)
+        subset_saccade_on_times = np.random.choice(subset_vis_exp_saccade_onset_times, num_trials_to_get)
 
     # align to visual stimulus
     for n_trial, vis_on_time in enumerate(subset_vis_on_times):
@@ -872,8 +1087,27 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     Y_hat_saccade_aligned_flattened = Y_hat_saccade_aligned.reshape(-1, num_neurons)
     Y_saccade_aligned_flattened = Y_saccade_aligned.reshape(-1, num_neurons)
 
-    vis_aligned_var_explained = sklmetrics.explained_variance_score(Y_vis_aligned_flattened, Y_hat_vis_aligned_flattened, multioutput='raw_values')
+    if np.all(np.isnan(Y_vis_aligned_flattened)):
+        print('No vis aligned data found, assuming saccade only experiment and setting vis aligned variance to NaN')
+        vis_aligned_var_explained = np.repeat(np.nan, num_neurons)
+    else:
+        vis_aligned_var_explained = sklmetrics.explained_variance_score(Y_vis_aligned_flattened,
+                                                                        Y_hat_vis_aligned_flattened,
+                                                                        multioutput='raw_values')
+
     saccade_aligned_var_explained = sklmetrics.explained_variance_score(Y_saccade_aligned_flattened, Y_hat_saccade_aligned_flattened, multioutput='raw_values')
+
+
+    if 'r2' in performance_metrics:
+        if np.all(np.isnan(Y_vis_aligned_flattened)):
+            vis_aligned_r2 = np.repeat(np.nan, num_neurons)
+        else:
+            vis_aligned_r2 = sklmetrics.r2_score(Y_vis_aligned_flattened, Y_hat_vis_aligned_flattened, multioutput='raw_values')
+        saccade_aligned_r2 = sklmetrics.r2_score(Y_saccade_aligned_flattened, Y_hat_saccade_aligned_flattened, multioutput='raw_values')
+
+
+    # if np.sum(vis_aligned_var_explained) != 0:
+    #     pdb.set_trace()
 
     regression_result['Y_hat_vis_aligned'] = Y_hat_vis_aligned
     regression_result['Y_vis_aligned'] = Y_vis_aligned
@@ -881,6 +1115,10 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     regression_result['Y_saccade_aligned'] = Y_saccade_aligned
     regression_result['vis_aligned_var_explained'] = vis_aligned_var_explained
     regression_result['saccade_aligned_var_explained'] = saccade_aligned_var_explained
+
+    if 'r2' in performance_metrics:
+        regression_result['vis_aligned_r2'] = vis_aligned_r2
+        regression_result['saccade_aligned_r2'] = saccade_aligned_r2
 
     return regression_result
 
@@ -1081,9 +1319,10 @@ def main():
 
     available_processes = ['load_data', 'plot_data', 'fit_regression_model', 'plot_regression_model_explained_var',
                            'plot_regression_model_example_neurons', 'compare_iterative_vs_normal_fit',
-                           'plot_pupil_data']
+                           'plot_pupil_data', 'plot_original_vs_aligned_explained_var',
+                           'plot_grating_vs_gray_screen_single_cell_fit_performance']
 
-    processes_to_run = ['fit_regression_model']
+    processes_to_run = ['plot_grating_vs_gray_screen_single_cell_fit_performance']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -1100,9 +1339,11 @@ def main():
         'fit_regression_model': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
-            file_types_to_load=['_windowVis', '_windowGray', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
-                                '_saccadeIntervalsVis', '_pupilSizeVis'],
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',  # gray screen experiments
+                                ],
             X_sets_to_compare={'bias_only': ['bias'],
                                'vis_on_only': ['bias', 'vis_on'],
                                'vis_ori': ['bias', 'vis_ori'],
@@ -1120,7 +1361,11 @@ def main():
                                   'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0],
                                   'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0],
                                   'pupil_size': None},
-            dataset='grating',
+            performance_metrics=['explained_variance', 'r2'],
+            exclude_saccade_in_vis_exp=True,
+            exp_type='gray',  # 'grating', 'gray', 'both'
+            exclude_saccade_on_vis_exp=True,
+            train_test_split_method='n_fold_cv',   # 'half' or 'n_fold_cv'
             neural_preprocessing_steps=['zscore'],  # 'zscore' is optional
         ),
         'plot_regression_model_explained_var': dict(
@@ -1138,35 +1383,49 @@ def main():
                 # ['vis', 'saccade'],
                 # ['vis_on_and_saccade_on', 'vis_on_and_saccade_on_and_interaction']
             ],  # options for metrics are : 'vis_aligned_var_explained', 'saccade_aligned_var_explained', '
-            metrics_to_compare=np.array([
-                 ['vis_aligned_var_explained', 'vis_aligned_var_explained'],
-                 ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
-                 ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
-                 ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
-                 ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
-            ]),
             # metrics_to_compare=np.array([
-            #     ['explained_var_per_X_set', 'explained_var_per_X_set'],
-            #     ['explained_var_per_X_set', 'explained_var_per_X_set'],
-            #     ['explained_var_per_X_set', 'explained_var_per_X_set'],
-            #     ['explained_var_per_X_set', 'explained_var_per_X_set'],
-            #     ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['vis_aligned_r2', 'vis_aligned_r2'],
+            #       ['saccade_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
             # ]),
-            custom_fig_addinfo='aligned',  # 'original', or 'aligned'
+            # metrics_to_compare=np.array([
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #        ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            # ]),
+            metrics_to_compare=np.array([
+                  ['vis_aligned_var_explained', 'vis_aligned_var_explained'],
+                  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
+                  ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+                  ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+                  ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+            ]),
+            custom_fig_addinfo='aligned',  # 'original', or 'aligned', 'aligned_r2', 'original_r2'
+            exp_type='both',  # 'grating', 'gray', 'both'
+            clip_at_zero=True,
         ),
         'plot_regression_model_example_neurons': dict(
             neuron_type_to_plot='saccade_on',  # 'vis_on', 'saccade_on', 'saccade_dir', 'vis_ori'
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression',
-            file_types_to_load=['_windowVis', '_windowGray', '_trial_Dir', '_saccadeVisDir',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
-                                '_saccadeIntervalsVis'],
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',  # gray screen experiments
+                                ],
             models_to_plot=['vis_ori', 'saccade_on_only'],  # 'vis_on_only', 'saccade_on_only', 'vis_ori'
             model_colors = {'vis_on_only': 'orange',
                            'saccade_on_only': 'green',
                             'vis_ori': 'blue'},
+            exp_type='both',  # 'grating', 'gray', 'both'
+            exclude_saccade_on_vis_exp=True,
             group_by_orientation=True,
+            num_example_neurons_to_plot=10,
         ),
         'fit_iterative_orientation_model': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -1201,6 +1460,35 @@ def main():
             file_types_to_load=['_windowVis', '_windowGray', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
                                 '_saccadeIntervalsVis', '_pupilSizeVis'],
+        ),
+        'plot_original_vs_aligned_explained_var': dict(
+            neuron_type_to_plot='saccade_on',  # 'vis_on', 'saccade_on', 'saccade_dir', 'vis_ori'
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression',
+            file_types_to_load=['_windowVis', '_windowGray', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis'],
+            models_to_plot=['vis_ori', 'saccade_on_only'],  # 'vis_on_only', 'saccade_on_only', 'vis_ori'
+            model_colors={'vis_on_only': 'orange',
+                          'saccade_on_only': 'green',
+                          'vis_ori': 'blue'},
+            group_by_orientation=True,
+            X_set_to_plot='saccade',  # 'vis_ori', or 'saccade'
+            plot_single_neuron_examples=False,
+            plot_overall_summary=True,
+        ),
+        'plot_grating_vs_gray_screen_single_cell_fit_performance': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression',
+            metrics_to_compare=np.array([
+                ['vis_aligned_var_explained', 'vis_aligned_var_explained'],
+                ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
+                ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+                ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+                ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
+            ]),
+            custom_fig_addinfo='aligned',
         )
     }
 
@@ -1235,8 +1523,10 @@ def main():
                              file_types_to_load=process_params[process]['file_types_to_load'])
             regression_results_folder = process_params[process]['regression_results_folder']
             neural_preprocessing_steps = process_params[process]['neural_preprocessing_steps']
+            exclude_saccade_on_vis_exp = process_params[process]['exclude_saccade_on_vis_exp']
 
             X_sets_to_compare = process_params[process]['X_sets_to_compare']
+            performance_metrics = process_params[process]['performance_metrics']
             # feature_set = ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir']
 
             for exp_id, exp_data in data.items():
@@ -1247,9 +1537,19 @@ def main():
                 vis_aligned_explained_var_per_X_set = np.zeros((num_neurons, num_X_set))
                 saccade_aligned_explained_var_per_X_set = np.zeros((num_neurons, num_X_set))
 
+                vis_aligned_Y_hat_per_X_set = []
+                saccade_aligned_Y_hat_per_X_set = []
+                vis_aligned_Y_per_X_set = []
+                saccade_aligned_Y_per_X_set = []
+
                 exp_regression_result = dict()
                 exp_regression_result['X_sets_names'] = list(X_sets_to_compare.keys())
                 Y_test_hat_per_X_set = []
+
+                if 'r2' in performance_metrics:
+                    r2_per_X_set = np.zeros((num_neurons, num_X_set))
+                    vis_aligned_r2_per_X_set = np.zeros((num_neurons, num_X_set))
+                    saccade_aligned_r2_per_X_set = np.zeros((num_neurons, num_X_set))
 
                 for n_X_set, (X_set_name, feature_set) in enumerate(X_sets_to_compare.items()):
 
@@ -1277,35 +1577,51 @@ def main():
 
                     X, Y = make_X_Y_for_regression(exp_data, feature_set=feature_set,
                                                    neural_preprocessing_steps=neural_preprocessing_steps,
-                                                   train_indices=train_indices, test_indices=test_indices)
+                                                   train_indices=train_indices, test_indices=test_indices,
+                                                   exp_type=process_params[process]['exp_type'],
+                                                   exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp)
 
-                    regression_result = fit_regression_model(X, Y)
-                    regression_result = get_aligned_explained_variance(regression_result, exp_data)
+                    regression_result = fit_regression_model(X, Y, performance_metrics=performance_metrics,
+                                                             train_test_split_method=process_params[process]['train_test_split_method'])
+                    regression_result = get_aligned_explained_variance(regression_result, exp_data, performance_metrics=performance_metrics,
+                                                                       exp_type=process_params[process]['exp_type'],
+                                                                       exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp)
+
                     explained_var_per_X_set[:, n_X_set] = np.mean(regression_result['explained_variance_per_cv_set'], axis=1)
                     vis_aligned_explained_var_per_X_set[:, n_X_set] = regression_result['vis_aligned_var_explained']
                     saccade_aligned_explained_var_per_X_set[:, n_X_set] = regression_result['saccade_aligned_var_explained']
 
+                    if 'r2' in performance_metrics:
+                        r2_per_X_set[:, n_X_set] = np.mean(regression_result['r2_per_cv_set'], axis=1)
+                        vis_aligned_r2_per_X_set[:, n_X_set] = regression_result['vis_aligned_r2']
+                        saccade_aligned_r2_per_X_set[:, n_X_set] = regression_result['saccade_aligned_r2']
+
                     Y_test_hat_per_X_set.append(regression_result['Y_test_hat_per_cv_set'])
 
+                    vis_aligned_Y_hat_per_X_set.append(regression_result['Y_hat_vis_aligned'])
+                    saccade_aligned_Y_hat_per_X_set.append(regression_result['Y_hat_saccade_aligned'])
+                    vis_aligned_Y_per_X_set.append(regression_result['Y_vis_aligned'])
+                    saccade_aligned_Y_per_X_set.append(regression_result['Y_saccade_aligned'])
 
                 exp_regression_result['explained_var_per_X_set'] = explained_var_per_X_set
                 exp_regression_result['Y_test'] = regression_result['Y_test_per_cv_set']
                 exp_regression_result['vis_aligned_var_explained'] = vis_aligned_explained_var_per_X_set
                 exp_regression_result['saccade_aligned_var_explained'] = saccade_aligned_explained_var_per_X_set
 
-                exp_regression_result['Y_hat_vis_aligned'] = regression_result['Y_hat_vis_aligned']
-                exp_regression_result['Y_vis_aligned'] = regression_result['Y_vis_aligned']
-                exp_regression_result['Y_hat_saccade_aligned'] = regression_result['Y_hat_saccade_aligned']
-                exp_regression_result['Y_saccade_aligned'] = regression_result['Y_saccade_aligned']
+                if 'r2' in performance_metrics:
+                    exp_regression_result['r2_per_X_set'] = r2_per_X_set
+                    exp_regression_result['vis_aligned_r2'] = vis_aligned_r2_per_X_set
+                    exp_regression_result['saccade_aligned_r2'] = saccade_aligned_r2_per_X_set
 
-                # if exp_id == 'SS047_2015-12-03':
-                #     pdb.set_trace()
-
+                exp_regression_result['Y_hat_vis_aligned'] = vis_aligned_Y_hat_per_X_set
+                exp_regression_result['Y_vis_aligned'] = vis_aligned_Y_per_X_set
+                exp_regression_result['Y_hat_saccade_aligned'] = saccade_aligned_Y_hat_per_X_set
+                exp_regression_result['Y_saccade_aligned'] = saccade_aligned_Y_per_X_set
                 exp_regression_result['Y_test_hat'] = np.array(Y_test_hat_per_X_set)
                 exp_regression_result['test_idx_per_cv_set'] = regression_result['test_idx_per_cv_set']
 
 
-                regression_result_savename = '%s_regression_results.npz' % exp_id
+                regression_result_savename = '%s_%s_regression_results.npz' % (exp_id, process_params[process]['exp_type'])
                 regression_result_savepath = os.path.join(regression_results_folder, regression_result_savename)
                 np.savez(regression_result_savepath, **exp_regression_result)
 
@@ -1340,10 +1656,6 @@ def main():
 
                 exp_regression_result['explained_var_per_X_set'] = explained_var_per_X_set
                 exp_regression_result['Y_test'] = regression_result['Y_test_per_cv_set']
-
-                # if exp_id == 'SS047_2015-12-03':
-                #     pdb.set_trace()
-
                 exp_regression_result['Y_test_hat'] = np.array(Y_test_hat_per_X_set)
                 exp_regression_result['test_idx_per_cv_set'] = regression_result['test_idx_per_cv_set']
 
@@ -1352,11 +1664,11 @@ def main():
                 # np.savez(regression_result_savepath, **exp_regression_result)
 
 
-
         if process == 'plot_regression_model_explained_var':
 
+            exp_type = process_params[process]['exp_type']
             regression_result_files = glob.glob(os.path.join(process_params[process]['regression_results_folder'],
-                                                             '*npz'))
+                                                             '*%s*npz' % exp_type))
             X_sets_to_compare = process_params[process]['X_sets_to_compare']
             metrics_to_compare = process_params[process]['metrics_to_compare']
             custom_fig_addinfo = process_params[process]['custom_fig_addinfo']
@@ -1397,7 +1709,10 @@ def main():
                         both_model_explained_var = np.concatenate([model_a_explained_var,
                                                                   model_b_explained_var])
 
-                        both_model_min = np.min(both_model_explained_var)
+                        if process_params[process]['clip_at_zero']:
+                            both_model_min = -0.1
+                        else:
+                            both_model_min = np.min(both_model_explained_var)
                         both_model_max = np.max(both_model_explained_var)
                         unity_vals = np.linspace(both_model_min, both_model_max, 100)
                         axs[n_comparison].axvline(0, linestyle='--', color='gray', alpha=0.5, lw=0.75, zorder=-1)
@@ -1406,24 +1721,96 @@ def main():
                         axs[n_comparison].set_xlabel(model_a, size=text_size)
                         axs[n_comparison].set_ylabel(model_b, size=text_size)
 
+                        axs[n_comparison].set_xlim([both_model_min, both_model_max])
+                        axs[n_comparison].set_ylim([both_model_min, both_model_max])
+
                     exp_id_parts = os.path.basename(fpath).split('.')[0].split('_')
                     subject = exp_id_parts[0]
                     exp_date = exp_id_parts[1]
 
                     if custom_fig_addinfo is not None:
-                        fig_name = '%s_%s_%s_explained_variance_per_X_set_comparison' % (subject, exp_date, custom_fig_addinfo)
+                        fig_name = '%s_%s_%s_%s_explained_variance_per_X_set_comparison' % (exp_type, subject, exp_date, custom_fig_addinfo)
                     else:
-                        fig_name = '%s_%s_explained_variance_per_X_set_comparison' % (subject, exp_date)
+                        fig_name = '%s_%s_%s_explained_variance_per_X_set_comparison' % (exp_type, subject, exp_date)
                     fig.tight_layout()
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbbox_inches='tight')
 
                     plt.close(fig)
+        if process == 'plot_grating_vs_gray_screen_single_cell_fit_performance':
+
+            print('Plotting grating vs gray screen single cell performance')
+            regression_results_folder = process_params[process]['regression_results_folder']
+            fig_folder = process_params[process]['fig_folder']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in regression_result_files]
+
+            for exp_id in exp_ids:
+                grating_regression_result = np.load(glob.glob(os.path.join(regression_results_folder, '*%s*grating*.npz' % (exp_id)))[0])
+                gray_regression_result = np.load(glob.glob(os.path.join(regression_results_folder, '*%s*gray*.npz' % (exp_id)))[0])
+
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                    fig, axs = plt.subplots(1, 2)
+                    fig.set_size_inches(8, 4)
+
+
+                    # Full variance explained
+                    grating_exp_vis_ori_model_idx = np.where(
+                        grating_regression_result['X_sets_names'] == 'vis_ori'
+                    )[0][0]
+
+                    gray_exp_saccade_dir_model_idx = np.where(
+                        gray_regression_result['X_sets_names'] == 'saccade'
+                    )[0][0]
+
+                    grating_exp_vis_ori_explained_var = grating_regression_result['explained_var_per_X_set'][:, grating_exp_vis_ori_model_idx]
+                    gray_exp_saccade_dir_explained_var = gray_regression_result['explained_var_per_X_set'][:, gray_exp_saccade_dir_model_idx]
+
+                    axs[0].scatter(
+                        grating_exp_vis_ori_explained_var,
+                        gray_exp_saccade_dir_explained_var, lw=0, color='black', s=10
+                    )
+
+                    axs[0].set_xlabel('Grating exp vis ori model', size=11)
+                    axs[0].set_ylabel('Gray screen saccade dir model', size=11)
+                    axs[0].set_title('Full explained variance', size=11)
+
+                    # Aligned variance explained
+                    grating_exp_vis_ori_aligned_explained_var = grating_regression_result['vis_aligned_var_explained'][:,
+                                                        grating_exp_vis_ori_model_idx]
+                    gray_exp_saccade_dir_aligned_explained_var = gray_regression_result['saccade_aligned_var_explained'][:,
+                                                         gray_exp_saccade_dir_model_idx]
+
+                    axs[1].scatter(
+                        grating_exp_vis_ori_aligned_explained_var,
+                        gray_exp_saccade_dir_aligned_explained_var, lw=0, color='black', s=10
+                    )
+
+                    axs[1].set_xlabel('Grating exp vis ori model', size=11)
+                    axs[1].set_ylabel('Gray screen saccade dir model', size=11)
+                    axs[1].set_title('Aligned explained variance', size=11)
+
+                    fig_name = '%s_grating_vs_gray_exp_explained_var_per_neuron' % exp_id
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+
+
+
+
+
+
+
         if process == 'plot_regression_model_example_neurons':
 
             # TODO: currently this assumes the Y_test cv split consists of first half and second half of recording
-
+            exp_type = process_params[process]['exp_type']
             regression_result_files = glob.glob(os.path.join(process_params[process]['regression_results_folder'],
-                                                             '*npz'))
+                                                             '*%s*npz' % exp_type))
+            exclude_saccade_on_vis_exp = process_params[process]['exclude_saccade_on_vis_exp']
+
             fig_folder = process_params[process]['fig_folder']
 
             models_to_plot = process_params[process]['models_to_plot']
@@ -1434,7 +1821,7 @@ def main():
                              file_types_to_load=process_params[process]['file_types_to_load'])
 
             neuron_type_to_plot = process_params[process]['neuron_type_to_plot']
-            num_example_neurons_to_plot = 10
+            num_example_neurons_to_plot = process_params[process]['num_example_neurons_to_plot']
 
             for fpath in regression_result_files:
 
@@ -1444,11 +1831,19 @@ def main():
                 explained_var_per_X_set = regression_result['explained_var_per_X_set']
                 Y_test = regression_result['Y_test']  # num cv x num time points x num neurons
                 Y_test_hat = regression_result['Y_test_hat'] # num model x num cv x num time points x num neurons
-                Y = np.concatenate([Y_test[1], Y_test[0]])
-                try:
-                    Y_hat = np.concatenate([Y_test_hat[:, 1, :, :], Y_test_hat[:, 0, :, :]], axis=1)
-                except:
-                    pdb.set_trace()
+
+                if len(Y_test) == 2:
+                    print('Assuming half test half train')
+                    Y = np.concatenate([Y_test[1], Y_test[0]])  # reproduce the entire trace (assume 2 fold cv)
+                    try:
+                        Y_hat = np.concatenate([Y_test_hat[:, 1, :, :], Y_test_hat[:, 0, :, :]], axis=1)
+                    except:
+                        pdb.set_trace()
+                else:
+                    Y = np.concatenate(Y_test)
+                    num_x_set = np.shape(Y_test_hat)[0]
+                    Y_hat = np.array([np.concatenate(Y_test_hat[x_set_idx, :]) for x_set_idx in np.arange(num_x_set)])
+                    all_test_idx = np.concatenate(regression_result['test_idx_per_cv_set'])
 
                 model_results_dict = {}
 
@@ -1484,12 +1879,12 @@ def main():
 
                     neuron_df_sorted = vis_ori_neuron_df.sort_values('vis_ori')[::-1]
 
-                if len(model_result_df) == 383:
-                    pdb.set_trace()
+                num_neurons_to_plot = np.min([num_example_neurons_to_plot, len(neuron_df_sorted)])
+
                 num_model = len(models_to_plot)
                 linewidth = 1
 
-                for n_neuron in np.arange(num_example_neurons_to_plot):
+                for n_neuron in np.arange(num_neurons_to_plot):
 
                     neuron_idx = neuron_df_sorted.index.values[n_neuron]
 
@@ -1526,13 +1921,17 @@ def main():
                         subject = exp_id_parts[0]
                         exp_date = exp_id_parts[1]
                         exp_data = data['%s_%s' % (subject, exp_date)]
-                        grating_intervals = exp_data['_gratingIntervals']
-                        vis_exp_saccade_intervals = exp_data['_saccadeIntervalsVis']
+
                         vis_exp_times = exp_data['_windowVis'].flatten()
 
+                        exp_times, exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial = \
+                            get_vis_and_saccade_times(exp_data, exp_type=exp_type, exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp)
 
-                        grating_onset_times = grating_intervals[:, 0]
+                        print('Exp times length: %.f' % len(exp_times))
+                        print('All test idx length: %.f' % len(all_test_idx))
+                        exp_times = exp_times[all_test_idx]
 
+                        # grating_onset_times = grating_intervals[:, 0]
                         feature_time_windows = {'vis_on': [-1.0, 3.0], 'vis_dir': [-1.0, 3.0],
                                                 'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0]}
 
@@ -1547,16 +1946,11 @@ def main():
                         Y_grating_onset_aligned = np.zeros((num_trials, num_sample_in_window))
                         Y_hat_grating_onset_aligned = np.zeros((num_model, num_trials, num_sample_in_window))
 
-                        grating_id_per_trial = exp_data['_gratingIds'] - 1  # matab 1 indexing to python 0 indexing
-                        id_to_grating_orientations = exp_data['_gratingIdDirections']
-                        grating_orientation_per_trial = [id_to_grating_orientations[int(x)][0] for x in
-                                                         grating_id_per_trial]
-
                         for n_trial, onset_time in enumerate(subset_onset_time):
 
-                            start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                            end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
-                            samples_to_get = np.arange(start_sample, end_sample)
+                            start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                            end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
+                            samples_to_get = np.arange(start_sample, end_sample)  # +1 here temp fix 2022-08-30
                             samples_to_get = samples_to_get[0:num_sample_in_window]
 
                             Y_grating_onset_aligned[n_trial, :] = Y[samples_to_get, neuron_idx]
@@ -1585,26 +1979,29 @@ def main():
 
                         # Align to saccade onset and plot that
                         feature_time_window = feature_time_windows['saccade_on']
-                        vis_exp_saccade_onset_frames = vis_exp_saccade_intervals[:, 0].astype(int)
-
-                        vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_onset_frames]
-                        subset_vis_exp_saccade_onset_times = vis_exp_saccade_onset_times[
-                            (vis_exp_saccade_onset_times + feature_time_window[1] < vis_exp_times[-1]) &
-                            (vis_exp_saccade_onset_times + feature_time_window[0] > vis_exp_times[0])
+                        # vis_exp_saccade_onset_frames = vis_exp_saccade_intervals[:, 0].astype(int)
+                        # vis_exp_saccade_onset_times = vis_exp_times[vis_exp_saccade_onset_frames]
+                        subset_exp_saccade_onset_times = exp_saccade_onset_times[
+                            (exp_saccade_onset_times + feature_time_window[1] < exp_times[-1]) &
+                            (exp_saccade_onset_times + feature_time_window[0] > exp_times[0])
                         ]
-                        n_saccade_trials = len(subset_vis_exp_saccade_onset_times)
+                        n_saccade_trials = len(subset_exp_saccade_onset_times)
 
                         Y_vis_exp_saccade_aligned = np.zeros((n_saccade_trials, num_sample_in_window))
                         Y_hat_vis_exp_saccade_aligned = np.zeros((num_model, n_saccade_trials, num_sample_in_window))
 
-                        for n_saccade_time, onset_time in enumerate(subset_vis_exp_saccade_onset_times):
 
-                            start_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[0])))
-                            end_sample = np.argmin(np.abs(vis_exp_times - (onset_time + feature_time_window[1])))
+                        for n_saccade_time, onset_time in enumerate(subset_exp_saccade_onset_times):
+
+                            start_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[0])))
+                            end_sample = np.argmin(np.abs(exp_times - (onset_time + feature_time_window[1])))
                             samples_to_get = np.arange(start_sample, end_sample)
                             samples_to_get = samples_to_get[0:num_sample_in_window]
 
-                            Y_vis_exp_saccade_aligned[n_saccade_time, :] = Y[samples_to_get, neuron_idx]
+                            try:
+                                Y_vis_exp_saccade_aligned[n_saccade_time, :] = Y[samples_to_get, neuron_idx]
+                            except:
+                                pdb.set_trace()
 
                             for n_X_set, X_set in enumerate(models_to_plot):
                                 model_idx = np.where(X_sets_names == X_set)[0][0]
@@ -1628,14 +2025,13 @@ def main():
                             ax3.plot(peri_event_time, mean_Y_hat_vis_exp_saccade_aligned[n_model, :], color=color,
                                      label=model, lw=linewidth)
 
-
                         ax3.set_title('Saccade onset', size=11)
 
                         ax2.set_ylabel('Activity', size=11)
                         ax2.set_xlabel('Peri-event time (s)', size=11)
                         ax3.set_xlabel('Peri-event time (s)', size=11)
 
-                        fig_name = '%s_%s_example_%s_neuron_%.f' % (subject, exp_date, neuron_type_to_plot, neuron_idx)
+                        fig_name = '%s_%s_%s_example_%s_neuron_%.f' % (exp_type, subject, exp_date, neuron_type_to_plot, neuron_idx)
                         fig.tight_layout()
                         fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
 
@@ -1683,8 +2079,8 @@ def main():
                             fig.text(0.5, 0, 'Peri-stimulus time (s)', size=11, ha='center')
                             fig.text(0, 0.5, 'Activity', size=11, va='center', rotation=90)
 
-                            fig_name = '%s_%s_example_%s_neuron_%.f_ori_tuning' % (
-                            subject, exp_date, neuron_type_to_plot, neuron_idx)
+                            fig_name = '%s_%s_%s_example_%s_neuron_%.f_ori_tuning' % (
+                            exp_type, subject, exp_date, neuron_type_to_plot, neuron_idx)
                             fig.tight_layout()
                             fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
 
@@ -1822,6 +2218,153 @@ def main():
                     fig, ax = plot_pupil_data(exp_data)
 
                     fig_name = '%s_pupil_trace' % (exp_id)
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+
+        if process == 'plot_original_vs_aligned_explained_var':
+
+            fig_folder = process_params[process]['fig_folder']
+            regression_result_files = glob.glob(os.path.join(process_params[process]['regression_results_folder'],
+                                                             '*npz'))
+            X_set_to_plot = process_params[process]['X_set_to_plot']
+
+            original_num_sig_neurons = []
+            aligned_num_sig_neurons = []
+            sig_threshold_val = 0
+
+            for fpath in regression_result_files:
+
+                regression_result = np.load(fpath, allow_pickle=True)
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+                Y_test = regression_result['Y_test']  # num cv x num time points x num neurons
+                Y_test_hat = regression_result['Y_test_hat']  # num model x num cv x num time points x num neurons
+                Y = np.concatenate([Y_test[1], Y_test[0]])  # reproduce the entire trace (assume 2 fold cv)
+                Y_hat = np.concatenate([Y_test_hat[:, 1, :, :], Y_test_hat[:, 0, :, :]], axis=1)
+
+                X_set_idx = np.where(X_sets_names == X_set_to_plot)[0][0]
+                original_explained_var = explained_var_per_X_set[:, X_set_idx]
+                if X_set_to_plot in ['saccade', 'saccade_on_only']:
+                    aligned_explained_var = regression_result['saccade_aligned_var_explained'][:, X_set_idx]
+                    Y_aligned = regression_result['Y_saccade_aligned'][X_set_idx]  # which model is this ???
+                    Y_hat_aligned = regression_result['Y_hat_saccade_aligned'][X_set_idx]
+                elif X_set_to_plot in ['vis_on_only', 'vis_ori']:
+                    aligned_explained_var = regression_result['vis_aligned_var_explained'][:, X_set_idx]
+                    Y_aligned = regression_result['Y_vis_aligned'][X_set_idx]
+                    Y_hat_aligned = regression_result['Y_hat_vis_aligned'][X_set_idx]
+
+
+                subset_indices = np.where(
+                    (original_explained_var > 0)
+                )[0]
+
+                original_num_sig_neurons.append(np.sum(original_explained_var > sig_threshold_val))
+                aligned_num_sig_neurons.append(np.sum(aligned_explained_var > sig_threshold_val))
+
+                if process_params[process]['plot_single_neuron_examples']:
+
+                    example_neuron_indices = np.arange(0, 10)
+
+                    for ex_idx in example_neuron_indices:
+
+                        neuron_idx = subset_indices[ex_idx]
+
+                        with plt.style.context(splstyle.get_style('nature-reviews')):
+                            fig = plt.figure()
+                            fig.set_size_inches(12, 6)
+                            gs = fig.add_gridspec(2, 2)
+                            ax1 = fig.add_subplot(gs[0, 0])
+                            ax2 = fig.add_subplot(gs[0, 1])
+                            ax3 = fig.add_subplot(gs[1, 1])
+                            ax4 = fig.add_subplot(gs[1, 0])
+
+                            all_explained_var = np.concatenate([original_explained_var, aligned_explained_var])
+                            all_ev_min = np.min(all_explained_var)
+                            all_ev_max = np.max(all_explained_var)
+                            unity_vals = np.linspace(all_ev_min, all_ev_max, 100)
+
+                            ax1.scatter(original_explained_var, aligned_explained_var, color='gray')
+                            ax1.scatter(original_explained_var[neuron_idx], aligned_explained_var[neuron_idx], color='black')
+                            ax1.axvline(0, linestyle='--', color='gray', lw=0.5, alpha=0.5)
+                            ax1.axhline(0, linestyle='--', color='gray', lw=0.5, alpha=0.5)
+                            ax1.plot(unity_vals, unity_vals, linestyle='--', color='gray', lw=0.5, alpha=0.5)
+                            ax1.set_xlabel('Original explained variance', size=11)
+                            ax1.set_ylabel('Aligned explained variance', size=11)
+
+                            Y_neuron = Y[:, neuron_idx]
+                            Y_hat_neuron = Y_hat[X_set_idx, :, neuron_idx]
+                            # pdb.set_trace()
+                            Y_aligned_neuron = Y_aligned[:, :, neuron_idx].flatten()
+                            Y_hat_aligned_neuron = Y_hat_aligned[:, :, neuron_idx].flatten()
+
+                            ax2.plot(Y_neuron, color='black', lw=1)
+                            ax2.plot(Y_hat_neuron, color='red', lw=1)
+
+                            var_y_neuron = np.var(Y_neuron)
+                            var_y_minus_y_hat = np.var(Y_neuron - Y_hat_neuron)
+                            ev_neuron = 1 - (var_y_minus_y_hat / var_y_neuron)
+
+                            ax2.set_title('Original, Var(y) = %.3f, Var(y - y_hat) = %.3f, ev = %.3f' % (
+                                 var_y_neuron, var_y_minus_y_hat, ev_neuron,
+                            ), size=9)
+
+                            # ax2.set_title('Original', size=9)
+
+                            y_max = np.max(Y_neuron)
+                            y_min = np.min(Y_neuron)
+                            ax2.set_ylim([y_min, y_max])
+
+
+                            var_y_neuron = np.var(Y_aligned_neuron)
+                            var_y_minus_y_hat = np.var(Y_aligned_neuron - Y_hat_aligned_neuron)
+                            ev_neuron = 1 - (var_y_minus_y_hat / var_y_neuron)
+
+                            ax3.plot(Y_aligned_neuron, color='black', lw=1)
+                            ax3.plot(Y_hat_aligned_neuron, color='red', lw=1)
+
+                            ax3.set_ylim([y_min, y_max])
+
+                            ax3.set_title('Aligned, Var(y) = %.3f, Var(y - y_hat) = %.3f, ev = %.3f' %
+                                           (
+                                               var_y_neuron, var_y_minus_y_hat, ev_neuron,
+                                          ), size=11)
+                            # ax3.set_title('Aligned', size=11)
+
+
+                            bins = np.linspace(y_min, y_max, 100)
+                            ax4.hist(Y_neuron, color='black', bins=bins)
+                            ax4.hist(Y_aligned_neuron, color='gray', bins=bins)
+
+
+                        exp_id_parts = os.path.basename(fpath).split('.')[0].split('_')
+                        subject = exp_id_parts[0]
+                        exp_date = exp_id_parts[1]
+
+                        fig.tight_layout()
+                        fig_name = '%s_%s_neuron_%.f_%s_original_vs_aligned_trace' % (subject, exp_date, neuron_idx, X_set_to_plot)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+
+
+
+            if process_params[process]['plot_overall_summary']:
+
+                all_num_sig_neurons = np.concatenate([original_num_sig_neurons, aligned_num_sig_neurons])
+                all_min = np.min(all_num_sig_neurons)
+                all_max = np.max(all_num_sig_neurons)
+                unity_vals = np.linspace(all_min, all_max, 100)
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, ax = plt.subplots()
+                    fig.set_size_inches(4, 4)
+                    ax.plot(unity_vals, unity_vals, linestyle='--', color='gray', lw=1, alpha=0.5)
+                    ax.scatter(original_num_sig_neurons, aligned_num_sig_neurons, color='black', lw=0)
+                    ax.set_xlabel('Original num sig neurons', size=11)
+                    ax.set_ylabel('Aligned num sig neurons', size=11)
+                    ax.set_xlim([all_min - 10, all_max + 10])
+                    ax.set_ylim([all_min - 10, all_max + 10])
+                    ax.set_title('%s' % X_set_to_plot, size=11)
+                    fig_name = 'all_exp_num_sig_neurons_in_%s_before_after_alignment' % (X_set_to_plot)
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
 
 
