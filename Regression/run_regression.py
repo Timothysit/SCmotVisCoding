@@ -448,7 +448,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
     elif ('zscore_w_baseline' in neural_preprocessing_steps) and ('z_score_separately' not in neural_preprocessing_steps):
         pdb.set_trace()
 
-
+    # TODO: need to z-score with baseline
 
     # Make X
     feature_matrices = []
@@ -1229,6 +1229,14 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
 
 def get_aligned_activity(exp_data, exp_type='grating', aligned_event='saccade', alignment_time_window=[-1, 3],
                          exclude_saccade_on_vis_exp=False):
+    """
+    Parameters
+    ----------
+
+    Returns
+    -------
+
+    """
 
 
     exp_times, exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial = get_vis_and_saccade_times(
@@ -1243,24 +1251,77 @@ def get_aligned_activity(exp_data, exp_type='grating', aligned_event='saccade', 
 
     min_time = exp_times[0]
     max_time = exp_times[-1]
-    subset_exp_saccade_onset_times = exp_saccade_onset_times[
-        (exp_saccade_onset_times + alignment_time_window[0] > min_time) &
-        (exp_saccade_onset_times + alignment_time_window[1] < max_time)
-    ]
 
-    aligned_activity = np.zeros((len(subset_exp_saccade_onset_times), num_time_bins, num_neurons)) + np.nan
+    if aligned_event == 'saccade':
+        subset_exp_saccade_onset_times = exp_saccade_onset_times[
+            (exp_saccade_onset_times + alignment_time_window[0] > min_time) &
+            (exp_saccade_onset_times + alignment_time_window[1] < max_time)
+        ]
 
-    for trial_i, saccade_time in enumerate(subset_exp_saccade_onset_times):
+        aligned_activity = np.zeros((len(subset_exp_saccade_onset_times), num_time_bins, num_neurons)) + np.nan
 
-        subset_idx = np.where(
-            (exp_times >= (saccade_time + alignment_time_window[0])) &
-            (exp_times <= (saccade_time + alignment_time_window[1]))
+        for trial_i, saccade_time in enumerate(subset_exp_saccade_onset_times):
+
+            subset_idx = np.where(
+                (exp_times >= (saccade_time + alignment_time_window[0])) &
+                (exp_times <= (saccade_time + alignment_time_window[1]))
+            )[0]
+
+            aligned_activity[trial_i, :, :] = neural_activity[subset_idx, :]
+
+        return aligned_activity, trial_type, time_windows
+
+    elif aligned_event == 'vis':
+
+        subset_grating_onset_trial_idx = np.where(
+             (grating_onset_times + alignment_time_window[0] > min_time) &
+             (grating_onset_times + alignment_time_window[1] < max_time)
         )[0]
 
-        aligned_activity[trial_i, :, :] = neural_activity[subset_idx, :]
+        subset_grating_onset_times = grating_onset_times[subset_grating_onset_trial_idx]
 
-    return aligned_activity, trial_type, time_windows
+        aligned_activity = np.zeros((len(subset_grating_onset_times), num_time_bins, num_neurons)) + np.nan
 
+        saccade_time = []
+        saccade_dir_during_vis = []
+
+        for trial_i, vis_on_time in enumerate(subset_grating_onset_times):
+
+            # Get saccade information
+            saccade_idx = np.where(
+                (exp_saccade_onset_times >= vis_on_time + alignment_time_window[0]) &
+                (exp_saccade_onset_times <= vis_on_time + alignment_time_window[1])
+            )[0]
+
+            if len(saccade_idx) > 0:
+                saccade_time.append(exp_saccade_onset_times[saccade_idx] - vis_on_time)
+                saccade_dir_during_vis.append(saccade_dirs[saccade_idx])
+            else:
+                saccade_time.append(np.array([]))
+                saccade_dir_during_vis.append(np.array([]))
+
+            # Get aligned activity
+            subset_idx = np.where(
+                (exp_times >= (vis_on_time + alignment_time_window[0])) &
+                (exp_times <= (vis_on_time + alignment_time_window[1]))
+            )[0]
+
+            # TODO: this is a bit strange...
+            if len(subset_idx) < num_time_bins:
+                # print('Not enough time bins, taking one back')
+                subset_idx = np.concatenate([np.array([subset_idx[0]-1]), subset_idx])
+
+            aligned_activity[trial_i, :, :] = neural_activity[subset_idx, :]
+
+        grating_id_per_trial = np.array(exp_data['_gratingIds'].flatten()) - 1 # to 0 indexing
+        grating_id_per_trial = grating_id_per_trial.astype(int)
+        grating_id_to_dir = np.array(exp_data['_gratingIdDirections'].flatten())
+
+        grating_id_per_trial_subset = grating_id_per_trial[subset_grating_onset_trial_idx]
+
+        vis_ori = np.array([grating_id_to_dir[x] for x in grating_id_per_trial_subset])
+
+        return aligned_activity, vis_ori, saccade_dir_during_vis, saccade_time, time_windows
 
 
 def do_iterative_orientation_fit(grating_orientation_per_trial):
@@ -1585,9 +1646,10 @@ def main():
                            'plot_grating_vs_gray_screen_single_cell_fit_performance',
                            'plot_grating_vs_gray_screen_example_neurons', 'compare_saccade_kernels',
                            'plot_sig_vs_nosig_neuron_explained_var', 'plot_saccade_neuron_psth_and_regression',
-                           'plot_sig_model_comparison_neurons', 'plot_num_saccade_per_ori']
+                           'plot_sig_model_comparison_neurons', 'plot_num_saccade_per_ori',
+                           'plot_vis_and_saccade_neuron_individual_trials']
 
-    processes_to_run = ['compare_saccade_kernels']
+    processes_to_run = ['plot_vis_and_saccade_neuron_individual_trials']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -1834,6 +1896,21 @@ def main():
             model_a_explained_var_threshold=0.1,
             model_b_explained_var_threshold=0.1,
             min_model_ev_diff=0.05,
+        ),
+        'plot_vis_and_saccade_neuron_individual_trials': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            num_neurons_to_plot=10,
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                # gray screen experiments
+                                ],
         )
     }
 
@@ -2724,9 +2801,13 @@ def main():
 
                 grating_exp_model_explained_var = grating_regression_result[metric_to_plot][:,
                                                         grating_exp_saccade_dir_model_idx]
+
                 gray_exp_model_explained_var = gray_regression_result[metric_to_plot][:,
                                                      gray_exp_saccade_dir_model_idx]
-                
+
+                gray_exp_model_saccade_aligned_ev = gray_regression_result['saccade_aligned_var_explained'][:, gray_exp_saccade_dir_model_idx]
+
+                """
                 grating_exp_Y_hat_saccade_aligned = grating_regression_result['Y_hat_saccade_aligned'][grating_exp_saccade_dir_model_idx, :, :, :]
                 gray_exp_Y_hat_saccade_aligned = gray_regression_result['Y_hat_saccade_aligned'][gray_exp_saccade_dir_model_idx, :, :, :]  # Trial x Time x Neurons
                 gray_exp_Y_saccade_aligned = gray_regression_result['Y_saccade_aligned'][gray_exp_saccade_dir_model_idx, :, :, :]
@@ -2746,12 +2827,174 @@ def main():
 
                 grating_exp_Y_hat_saccade_aligned_temporal = gray_exp_Y_hat_saccade_aligned[gray_exp_saccade_dir == 1, :, :]
                 grating_exp_Y_hat_saccade_aligned_nasal = gray_exp_Y_hat_saccade_aligned[gray_exp_saccade_dir == 0, :, :]
+                """
 
-                pdb.set_trace()
+                # Obtain the temporal kernel (weights) for the saccade response of each neuron
+                grating_exp_model_weights = grating_regression_result['model_weights_per_X_set'].item()[grating_exp_model]
+                grating_exp_model_weights_mean = np.mean(grating_exp_model_weights, axis=0)  # mean across the cross validation sets
+                grating_exp_saccade_on_weights_index = grating_regression_result['feature_indices_per_X_set'].item()[grating_exp_model]['saccade_on']
+                grating_exp_saccade_dir_weights_index = \
+                grating_regression_result['feature_indices_per_X_set'].item()[grating_exp_model]['saccade_dir']
 
-                # Obtain the temporal kernel for the saccade response of each neuron (basically Y_hat aligned? But may have to be smart about it, no visual response...)
+                grating_exp_saccade_on_weights = grating_exp_model_weights_mean[:, grating_exp_saccade_on_weights_index]
+                grating_exp_saccade_dir_weights = grating_exp_model_weights_mean[:, grating_exp_saccade_dir_weights_index]
+
+                gray_exp_model_weights = gray_regression_result['model_weights_per_X_set'].item()[gray_exp_model]
+                gray_exp_model_weights_mean = np.mean(gray_exp_model_weights, axis=0)  # mean across the cross validation sets
+                gray_exp_saccade_on_weights_index = \
+                    gray_regression_result['feature_indices_per_X_set'].item()[gray_exp_model]['saccade_on']
+                gray_exp_saccade_dir_weights_index = \
+                    gray_regression_result['feature_indices_per_X_set'].item()[gray_exp_model]['saccade_dir']
+
+                gray_exp_saccade_on_weights = gray_exp_model_weights_mean[:, gray_exp_saccade_on_weights_index]
+                gray_exp_saccade_dir_weights = gray_exp_model_weights_mean[:, gray_exp_saccade_dir_weights_index]
+
+                # Calculate the correlation of weights for each neuron
+                num_neurons = np.shape(gray_exp_saccade_on_weights)[0]
+                saccade_on_corr_per_neuron = np.zeros((num_neurons, ))
+                saccade_dir_corr_per_neuron = np.zeros((num_neurons, ))
+                for neuron_idx in np.arange(num_neurons):
+                    saccade_on_corr_per_neuron[neuron_idx], _ = sstats.pearsonr(grating_exp_saccade_on_weights[neuron_idx, :],
+                                                                                gray_exp_saccade_on_weights[neuron_idx, :])
+
+                    saccade_dir_corr_per_neuron[neuron_idx], _ = sstats.pearsonr(grating_exp_saccade_dir_weights[neuron_idx, :],
+                                                                                 gray_exp_saccade_dir_weights[neuron_idx, :])
 
 
+                saccade_on_sort_idx = np.argsort(saccade_on_corr_per_neuron)[::-1]
+                saccade_dir_sort_idx = np.argsort(saccade_dir_corr_per_neuron)[::-1]
+
+                # Saccade onset kernel correlation of all neurons
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                    fig, axs = plt.subplots(1, 3, sharey=True)
+                    fig.set_size_inches(8, 4)
+
+                    all_saccade_on_weights = np.concatenate([gray_exp_saccade_on_weights, grating_exp_saccade_on_weights])
+                    vmin = np.percentile(all_saccade_on_weights.flatten(), 10)
+                    vmax = np.percentile(all_saccade_on_weights.flatten(), 90)
+
+                    axs[0].imshow(gray_exp_saccade_on_weights[saccade_on_sort_idx, :], aspect='auto', vmin=vmin, vmax=vmax)
+                    axs[1].imshow(grating_exp_saccade_on_weights[saccade_on_sort_idx, :], aspect='auto', vmin=vmin, vmax=vmax)
+                    axs[0].set_xlabel('Time (frames)', size=11)
+                    axs[1].set_xlabel('Time (frames)', size=11)
+                    axs[0].set_ylabel('Neurons', size=11)
+                    axs[0].set_title('Gray exp', size=11)
+                    axs[1].set_title('Grating exp', size=11)
+
+                    axs[2].plot(saccade_on_corr_per_neuron[saccade_on_sort_idx], np.arange(num_neurons))
+                    axs[2].set_xlabel('Kernel correlation', size=11)
+
+                    fig.suptitle('%s saccade on kernel' % exp_id, size=11)
+
+                    fig_name = '%s_saccade_on_kernel_raster_corr_sorted' % exp_id
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=True)
+
+                plt.close(fig)
+
+                # Saccade direction kernel correlation of all neurons
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                    fig, axs = plt.subplots(1, 3, sharey=True)
+                    fig.set_size_inches(8, 4)
+
+                    all_saccade_dir_weights = np.concatenate(
+                        [gray_exp_saccade_dir_weights, grating_exp_saccade_dir_weights])
+                    vmin = np.percentile(all_saccade_dir_weights.flatten(), 10)
+                    vmax = np.percentile(all_saccade_dir_weights.flatten(), 90)
+
+                    axs[0].imshow(gray_exp_saccade_dir_weights[saccade_dir_sort_idx, :], aspect='auto', vmin=vmin, vmax=vmax)
+                    axs[1].imshow(grating_exp_saccade_dir_weights[saccade_dir_sort_idx, :], aspect='auto', vmin=vmin, vmax=vmax)
+                    axs[0].set_xlabel('Time (frames)', size=11)
+                    axs[1].set_xlabel('Time (frames)', size=11)
+                    axs[0].set_ylabel('Neurons', size=11)
+                    axs[0].set_title('Gray exp', size=11)
+                    axs[1].set_title('Grating exp', size=11)
+
+                    axs[2].plot(saccade_dir_corr_per_neuron[saccade_dir_sort_idx], np.arange(num_neurons))
+                    axs[2].set_xlabel('Kernel correlation', size=11)
+
+                    fig.suptitle('%s saccade dir kernel' % exp_id, size=11)
+
+                    fig_name = '%s_saccade_dir_kernel_raster_corr_sorted' % exp_id
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=True)
+
+                plt.close(fig)
+
+                # See if there is correlation between variance explained in gray exp model and correlation
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, axs = plt.subplots(1, 2)
+                    fig.set_size_inches(8, 4)
+
+                    axs[0].scatter(gray_exp_model_saccade_aligned_ev, saccade_on_corr_per_neuron, color='black', s=8)
+                    axs[1].scatter(gray_exp_model_saccade_aligned_ev, saccade_dir_corr_per_neuron, color='black', s=8)
+
+                    axs[0].set_xlabel('Gray exp explained var', size=11)
+                    axs[1].set_xlabel('Gray exp explained var', size=11)
+
+                    axs[0].set_ylabel('Saccade on kernel correlation', size=11)
+                    axs[1].set_ylabel('Saccade dir kernel correlation', size=11)
+
+                    # Lines to denote no correlation and zero variance explained
+                    [ax.axvline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
+                    [ax.axhline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
+
+                    fig.suptitle('%s' % exp_id, size=11)
+
+                    fig_name = '%s_overall_gray_exp_saccade_aligned_ev_vs_saccade_kernel_corr' % exp_id
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=False)
+
+                plt.close(fig)
+
+
+                # Get the top 10 neurons from each recording, and plot their traces
+                gray_exp_model_saccade_aligned_ev_sort_idx = np.argsort(gray_exp_model_saccade_aligned_ev)[::-1]
+
+                for neuron_idx in gray_exp_model_saccade_aligned_ev_sort_idx[0:num_neurons_to_plot]:
+
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, axs = plt.subplots(1, 4)
+                        fig.set_size_inches(12, 3)
+
+                        # Plot where it is located on the correlation axis
+                        axs[0].scatter(gray_exp_model_saccade_aligned_ev, saccade_on_corr_per_neuron, color='black',
+                                       s=8)
+                        axs[0].scatter(gray_exp_model_saccade_aligned_ev[neuron_idx], saccade_on_corr_per_neuron[neuron_idx], color='red',
+                                       s=8)
+
+                        axs[1].scatter(gray_exp_model_saccade_aligned_ev, saccade_dir_corr_per_neuron, color='black',
+                                       s=8)
+                        axs[1].scatter(gray_exp_model_saccade_aligned_ev[neuron_idx],
+                                       saccade_dir_corr_per_neuron[neuron_idx], color='red',
+                                       s=8)
+                        axs[0].set_xlabel('Gray exp explained var', size=11)
+                        axs[1].set_xlabel('Gray exp explained var', size=11)
+
+                        axs[0].set_ylabel('Saccade on kernel correlation', size=11)
+                        axs[1].set_ylabel('Saccade dir kernel correlation', size=11)
+
+                        # Lines to denote no correlation and zero variance explained
+                        [ax.axvline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
+                        [ax.axhline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
+
+                        # Plot saccade on temporal kernesl
+                        axs[2].plot(gray_exp_saccade_on_weights[neuron_idx, :], color='gray', label='Gray')
+                        axs[2].plot(grating_exp_saccade_on_weights[neuron_idx, :], color='black', label='Grating')
+                        axs[2].set_ylabel('Weights', size=11)
+                        axs[2].set_xlabel('Time (frames)', size=11)
+
+                        # Plot saccade direction temporal kernel
+                        axs[3].plot(gray_exp_saccade_dir_weights[neuron_idx, :], color='gray', label='Gray')
+                        axs[3].plot(grating_exp_saccade_dir_weights[neuron_idx, :], color='black', label='Grating')
+                        axs[3].set_ylabel('Weights', size=11)
+                        axs[3].set_xlabel('Time (frames)', size=11)
+                        axs[3].legend()
+
+                    fig.suptitle('%s neuron %.f' % (exp_id, neuron_idx), size=11)
+                    fig_name = '%s_neuron_%.f_saccade_kernel_comparison' % (exp_id, neuron_idx)
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=False)
+                    plt.close(fig)
 
         if process == 'compare_iterative_vs_normal_fit':
 
@@ -3344,7 +3587,222 @@ def main():
 
                         plt.close(fig)
 
+        if process == 'plot_vis_and_saccade_neuron_individual_trials':
 
+            regression_results_folder = process_params[process]['regression_results_folder']
+            fig_folder = process_params[process]['fig_folder']
+            plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
+            grating_exp_model = process_params[process]['grating_exp_model']
+            gray_exp_model = process_params[process]['gray_exp_model']
+            # metric_to_plot = 'explained_var_per_X_set'
+            metric_to_plot = 'saccade_aligned_var_explained'
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
+            num_neurons_to_plot = process_params[process]['num_neurons_to_plot']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            # Load all experiment data
+            data = load_data(data_folder=process_params[process]['data_folder'],
+                             file_types_to_load=process_params[process]['file_types_to_load'])
+
+            # Compare the temporal profile of the saccade kernels
+            exp_type = 'both'
+            for exp_id in exp_ids:
+                # Experiment data
+                exp_data = data[exp_id]
+
+                regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+                """
+                grating_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*grating*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+                gray_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*gray*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+                """
+
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+
+                model_a = 'vis_ori'
+                model_b = 'vis_and_saccade'
+
+                model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                b_minus_a = model_b_explained_var - model_a_explained_var
+
+                subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var > 0) &
+                    (model_b_explained_var > model_a_explained_var)
+                )[0]
+
+                vis_subset_idx = np.where(
+                    (model_a_explained_var > 0)
+                )[0]
+
+                b_minus_a_subset_sort_idx = np.argsort(b_minus_a[subset_idx])[::-1]
+                b_minus_a_sort_idx = subset_idx[b_minus_a_subset_sort_idx]
+
+                both_model_explained_var = np.concatenate([model_a_explained_var, model_b_explained_var])
+                both_min = np.min(both_model_explained_var)
+                both_max = np.max(both_model_explained_var)
+                unity_vals = np.linspace(both_min, both_max, 100)
+
+                # Get visual aligned activity of all neurons
+                vis_aligned_activity, vis_ori, saccade_dir_during_vis, saccade_time, time_windows = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='vis',
+                    alignment_time_window=[-1, 3],
+                    exclude_saccade_on_vis_exp=False)
+
+                saccade_on_trials = np.where([(len(x) > 0) for x in saccade_dir_during_vis])[0]
+                saccade_off_trials = np.where([(len(x) == 0) for x in saccade_dir_during_vis])[0]
+                saccade_time_saccade_on_trials = [x for x in saccade_time if len(x) > 0]
+                saccade_dir_saccade_on_trials = [x for x in saccade_dir_during_vis if len(x) > 0]
+
+                vis_aligned_activity_saccade_off = vis_aligned_activity[saccade_off_trials, :, :]
+                vis_aligned_activity_saccade_on = vis_aligned_activity[saccade_on_trials, :, :]
+
+                vis_ori_saccade_off = vis_ori[saccade_off_trials]
+                vis_ori_saccade_on = vis_ori[saccade_on_trials]
+
+                vis_ori_saccade_on_sort_idx = np.argsort(vis_ori_saccade_on)
+                vis_ori_saccade_off_sort_idx = np.argsort(vis_ori_saccade_off)
+
+                grating_cmap = mpl.cm.get_cmap(name='viridis')
+                vis_ori_subset = np.sort(np.unique(vis_ori[~np.isnan(vis_ori)]))
+                grating_colors = [grating_cmap(x / np.max(vis_ori_subset)) for x in vis_ori_subset]
+
+                for neuron_idx in b_minus_a_sort_idx[0:num_neurons_to_plot]:
+
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, axs = plt.subplots(1, 3)
+                        fig.set_size_inches(9, 6)
+
+                        # Plot explained variance
+                        axs[0].axvline(0, linestyle='--', color='gray', lw=1, alpha=0.3)
+                        axs[0].axhline(0, linestyle='--', color='gray', lw=1, alpha=0.3)
+                        axs[0].plot(unity_vals, unity_vals, linestyle='--', lw=1, color='gray', alpha=0.3)
+                        axs[0].scatter(model_b_explained_var, model_a_explained_var, color='black', s=8)
+                        axs[0].scatter(model_b_explained_var[neuron_idx], model_a_explained_var[neuron_idx], color='red', s=8)
+                        axs[0].set_xlabel(model_b, size=11)
+                        axs[0].set_ylabel(model_a, size=11)
+
+                        # Plot when there is no saccade
+                        y_offset = 0
+                        for within_saccade_off_idx in vis_ori_saccade_off_sort_idx:
+                            trial_vis_ori = vis_ori_saccade_off[within_saccade_off_idx]
+
+                            if np.isnan(trial_vis_ori):
+                                color = 'gray'
+                            else:
+                                color = grating_colors[np.where(vis_ori_subset == trial_vis_ori)[0][0]]
+
+                            trial_trace = vis_aligned_activity_saccade_off[within_saccade_off_idx, :, neuron_idx]
+                            axs[1].plot(time_windows, y_offset + trial_trace, color=color, lw=1)
+                            y_offset += np.max(trial_trace)
+
+
+                        # Plot visual onset aligned traces sorted by orientation and saccade
+                        y_offset = 0
+                        saccade_color_map = {
+                            -1: 'green',  # nasal
+                            1: 'purple',  # temporal
+                        }
+                        for within_saccade_on_idx in vis_ori_saccade_on_sort_idx:
+                            trial_vis_ori = vis_ori_saccade_on[within_saccade_on_idx]
+                            trial_saccade_time_rel_vis = saccade_time_saccade_on_trials[within_saccade_on_idx]
+                            trial_saccade_dirs = saccade_dir_saccade_on_trials[within_saccade_on_idx]
+                            trial_saccade_colors = [saccade_color_map[x] for x in trial_saccade_dirs]
+
+                            if np.isnan(trial_vis_ori):
+                                color = 'gray'
+                            else:
+                                color = grating_colors[np.where(vis_ori_subset == trial_vis_ori)[0][0]]
+
+                            trial_trace = vis_aligned_activity_saccade_on[within_saccade_on_idx, :, neuron_idx]
+                            axs[2].plot(time_windows, y_offset + trial_trace, color=color, lw=1)
+                            saccade_marker_y = np.mean(trial_trace) + y_offset
+                            
+                            axs[2].scatter(trial_saccade_time_rel_vis, np.repeat(saccade_marker_y, len(trial_saccade_time_rel_vis)), 
+                                           color=trial_saccade_colors, marker='v', s=3)
+                            y_offset += np.max(trial_trace)
+
+                        # Legend
+                        legend_elements = []
+
+                        legend_elements.append(
+                            mpl.lines.Line2D([0], [0], color='gray', lw=1, label='blank')
+                        )
+                        # Flip the order just to match the one in the plot
+                        for ori_idx, color in enumerate(grating_colors[::-1]):
+                            legend_elements.append(
+                                mpl.lines.Line2D([0], [0], color=color, lw=1, label=vis_ori_subset[::-1][ori_idx]),
+                            )
+
+                        legend_elements.append(
+                            mpl.lines.Line2D([0], [0], marker='v', color='green', lw=0, label='Nasal', markeredgecolor='None')
+                        )
+                        legend_elements.append(
+                            mpl.lines.Line2D([0], [0], marker='v', color = 'purple', lw=0, label='Temporal', markeredgecolor='None')
+                        )
+
+                        fig.legend(handles=legend_elements, bbox_to_anchor=(1.04, 0.7))
+
+                        fig.suptitle('%s neuron %.f' % (exp_id, neuron_idx), size=11)
+                        fig_name = '%s_neuron_%.f_vis_aligned_ori_sorted_response_with_saccade_time' % (exp_id, neuron_idx)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+
+
+                # Get the prefer orientation of all neurons
+                num_neurons = np.shape(vis_aligned_activity)[2]
+                mean_response_per_ori = np.zeros((len(vis_ori_subset), num_neurons))
+                for ori_i, ori in enumerate(vis_ori_subset):
+                    trial_idx = np.where(vis_ori == ori)[0]
+                    ori_activity = np.mean(vis_aligned_activity[trial_idx, :, :], axis=0)
+                    mean_response_per_ori[ori_i, :] = np.mean(ori_activity, axis=0)
+
+                pref_idx_per_neuron = np.argmax(mean_response_per_ori, axis=0)
+                pref_ori_per_neuron = vis_ori_subset[pref_idx_per_neuron]
+
+                # Plot the prefer orientation of all the "signicicant" neurons
+                all_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron == x)[0]) for x in vis_ori_subset])
+                vis_saccade_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[subset_idx] == x)[0]) for x in vis_ori_subset])
+                vis_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[vis_subset_idx] == x)[0]) for x in vis_ori_subset])
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, axs = plt.subplots(1, 3, sharex=True)
+                    fig.set_size_inches(9, 3)
+                    axs[0].bar(vis_ori_subset, all_neuron_num_neuron_per_ori, lw=5, color='black')
+                    axs[1].bar(vis_ori_subset, vis_neuron_num_neuron_per_ori, lw=5, color='black')
+                    axs[2].bar(vis_ori_subset, vis_saccade_neuron_num_neuron_per_ori, lw=5, color='black')
+
+                    axs[0].set_ylabel('Number of neurons', size=11)
+                    axs[0].set_title('All neurons', size=11)
+                    axs[1].set_title('Vis neurons', size=11)
+                    axs[2].set_title('Vis + Saccade neurons', size=11)
+
+                    fig.text(0.5, 0, 'Preferred orientation', ha='center', size=11)
+                    axs[0].set_xticks([0, 90, 180, 270, 360])
+
+                    fig.suptitle('%s' % (exp_id), size=11)
+                    fig_name = '%s_neuron_preferred_orientation' % (exp_id)
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                    plt.close(fig)
 
 if __name__ == '__main__':
     main()
