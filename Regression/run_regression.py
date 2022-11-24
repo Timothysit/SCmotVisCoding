@@ -1,5 +1,6 @@
 import os
 import glob
+import time
 import numpy as np
 import scipy.stats as sstats
 import sklearn
@@ -30,6 +31,51 @@ from tqdm import tqdm  # loading bar
 # Stats
 import statsmodels.api as sm
 from pymer4.models import Lmer
+import scipy.optimize as spopt
+import scipy
+import cmath  # for circular statistics
+
+# parallel processing
+import ray
+
+def von_mises(x, mu, kappa):
+    return np.exp( kappa*np.cos((x - mu)) ) / (2 * np.pi * scipy.special.i0(kappa))
+
+def von_mises2(x, par1, par2, par3, par4, par5):
+    """
+    Inputs take in
+
+    Parameters
+    ----------
+    x : numpy ndarray
+        the presented stimuli orientation in degrees
+    par1 : float
+        the peak tuning (in degrees)
+    par2 : float
+        scales the response at the primary peak
+    par3 :
+    par4 :
+    par5 :
+    """
+
+    Dp = par1 * np.pi / 180  # convert from degrees to radians
+    Rp = par2
+    Rn = par3
+    Ro = par4
+    kappa = 1 / (par5 * np.pi / 180) # kappa is approximately sigma^2 of the Guassian
+    alpha = x * np.pi / 180
+
+    # kappa = 1 / kappa # 1 / kappa is approximately sigma^2 of the Guassian
+
+    s_vm_p = np.exp( kappa * (np.cos(alpha - Dp))) / (2 * np.pi * scipy.special.i0(kappa))
+    s_vm_n = np.exp( kappa * (np.cos(alpha - (Dp + np.pi)))) / (2 * np.pi * scipy.special.i0(kappa))
+
+    s_vm_p = s_vm_p / np.max(s_vm_p)
+    s_vm_n = s_vm_n / np.max(s_vm_n)
+
+    r = Rp * s_vm_p + Rn * s_vm_n + Ro
+
+    return r
 
 
 def load_data(data_folder, file_types_to_load=['_windowVis'],
@@ -1087,14 +1133,21 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     vis_exp_times, vis_exp_saccade_onset_times, grating_onset_times, saccade_dirs, grating_orientation_per_trial = get_vis_and_saccade_times(
         exp_data, exp_type=exp_type, exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp)
 
+    if type(alignment_time_window) is dict:
+        vis_alignment_time_window = alignment_time_window['vis']
+        saccade_alignment_time_window = alignment_time_window['saccade']
+    else:
+        vis_alignment_time_window = alignment_time_window
+        saccade_alignment_time_window = alignment_time_window
+
     subset_vis_exp_vis_onset_times = grating_onset_times[
-        (grating_onset_times + alignment_time_window[1] < vis_exp_times[-1]) &
-        (grating_onset_times + alignment_time_window[0] > vis_exp_times[0])
+        (grating_onset_times + vis_alignment_time_window[1] < vis_exp_times[-1]) &
+        (grating_onset_times + vis_alignment_time_window[0] > vis_exp_times[0])
         ]
 
     subset_vis_exp_saccade_onset_times = vis_exp_saccade_onset_times[
-        (vis_exp_saccade_onset_times + alignment_time_window[1] < vis_exp_times[-1]) &
-        (vis_exp_saccade_onset_times + alignment_time_window[0] > vis_exp_times[0])
+        (vis_exp_saccade_onset_times + saccade_alignment_time_window[1] < vis_exp_times[-1]) &
+        (vis_exp_saccade_onset_times + saccade_alignment_time_window[0] > vis_exp_times[0])
         ]
 
     num_time_points = len(vis_exp_times)
@@ -1117,17 +1170,21 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     num_grating_presentations = len(subset_vis_exp_vis_onset_times)
 
     sec_per_time_samples = np.mean(np.diff(vis_exp_times))
-    num_aligned_time_points = int((alignment_time_window[1] - alignment_time_window[0]) / sec_per_time_samples)
+
+    num_vis_aligned_time_points = int((vis_alignment_time_window[1] - vis_alignment_time_window[0]) / sec_per_time_samples)
+    num_saccade_aligned_time_points = int(
+        (saccade_alignment_time_window[1] - saccade_alignment_time_window[0]) / sec_per_time_samples)
+
 
     if exp_type == 'gray':
         num_trials_to_get = num_saccades
     else:
         num_trials_to_get = np.min([num_saccades, num_grating_presentations])
 
-    Y_hat_vis_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
-    Y_vis_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
-    Y_hat_saccade_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
-    Y_saccade_aligned = np.zeros((num_trials_to_get, num_aligned_time_points, num_neurons)) + np.nan
+    Y_hat_vis_aligned = np.zeros((num_trials_to_get, num_vis_aligned_time_points, num_neurons)) + np.nan
+    Y_vis_aligned = np.zeros((num_trials_to_get, num_vis_aligned_time_points, num_neurons)) + np.nan
+    Y_hat_saccade_aligned = np.zeros((num_trials_to_get, num_saccade_aligned_time_points, num_neurons)) + np.nan
+    Y_saccade_aligned = np.zeros((num_trials_to_get, num_saccade_aligned_time_points, num_neurons)) + np.nan
 
     if exp_type == 'gray':
         subset_vis_on_times = []
@@ -1140,11 +1197,11 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     for n_trial, vis_on_time in enumerate(subset_vis_on_times):
 
         time_idx = np.where(
-            (vis_exp_times >= (vis_on_time + alignment_time_window[0])) &
-            (vis_exp_times <= (vis_on_time + alignment_time_window[1]))
+            (vis_exp_times >= (vis_on_time + vis_alignment_time_window[0])) &
+            (vis_exp_times <= (vis_on_time + vis_alignment_time_window[1]))
         )[0]
 
-        time_idx = time_idx[0:num_aligned_time_points]
+        time_idx = time_idx[0:num_vis_aligned_time_points]
 
         Y_hat_vis_aligned[n_trial, :, :] = Y_hat[time_idx, :]
         Y_vis_aligned[n_trial, :, :] = Y[time_idx, :]
@@ -1152,11 +1209,11 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
     # align to saccade onset
     for n_trial, saccade_on_time in enumerate(subset_saccade_on_times):
         time_idx = np.where(
-            (vis_exp_times >= (saccade_on_time + alignment_time_window[0])) &
-            (vis_exp_times <= (saccade_on_time + alignment_time_window[1]))
+            (vis_exp_times >= (saccade_on_time + saccade_alignment_time_window[0])) &
+            (vis_exp_times <= (saccade_on_time + saccade_alignment_time_window[1]))
         )[0]
 
-        time_idx = time_idx[0:num_aligned_time_points]
+        time_idx = time_idx[0:num_saccade_aligned_time_points]
 
         Y_hat_saccade_aligned[n_trial, :, :] = Y_hat[time_idx, :]
         Y_saccade_aligned[n_trial, :, :] = Y[time_idx, :]
@@ -1199,27 +1256,27 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
 
 
     # Get the full Y_vis_aligned and Y_saccade_aligned for later plotting
-    Y_vis_aligned_full = np.zeros((len(subset_vis_exp_vis_onset_times), num_aligned_time_points, num_neurons)) + np.nan
-    Y_saccade_aligned_full = np.zeros((len(subset_vis_exp_saccade_onset_times), num_aligned_time_points, num_neurons)) + np.nan
+    Y_vis_aligned_full = np.zeros((len(subset_vis_exp_vis_onset_times), num_vis_aligned_time_points, num_neurons)) + np.nan
+    Y_saccade_aligned_full = np.zeros((len(subset_vis_exp_saccade_onset_times), num_saccade_aligned_time_points, num_neurons)) + np.nan
 
     # align to visual stimulus
     for n_trial, vis_on_time in enumerate(subset_vis_exp_vis_onset_times):
 
         time_idx = np.where(
-            (vis_exp_times >= (vis_on_time + alignment_time_window[0])) &
-            (vis_exp_times <= (vis_on_time + alignment_time_window[1]))
+            (vis_exp_times >= (vis_on_time + vis_alignment_time_window[0])) &
+            (vis_exp_times <= (vis_on_time + vis_alignment_time_window[1]))
         )[0]
 
-        time_idx = time_idx[0:num_aligned_time_points]
+        time_idx = time_idx[0:num_vis_aligned_time_points]
 
         Y_vis_aligned_full[n_trial, :, :] = Y[time_idx, :]
 
     for n_trial, saccade_on_time in enumerate(subset_vis_exp_saccade_onset_times):
         time_idx = np.where(
-            (vis_exp_times >= (saccade_on_time + alignment_time_window[0])) &
-            (vis_exp_times <= (saccade_on_time + alignment_time_window[1]))
+            (vis_exp_times >= (saccade_on_time + saccade_alignment_time_window[0])) &
+            (vis_exp_times <= (saccade_on_time + saccade_alignment_time_window[1]))
         )[0]
-        time_idx = time_idx[0:num_aligned_time_points]
+        time_idx = time_idx[0:num_saccade_aligned_time_points]
         Y_saccade_aligned_full[n_trial, :, :] = Y[time_idx, :]
 
     regression_result['Y_vis_aligned_full'] = Y_vis_aligned_full
@@ -1227,15 +1284,18 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
 
     return regression_result
 
+
 def get_aligned_activity(exp_data, exp_type='grating', aligned_event='saccade', alignment_time_window=[-1, 3],
-                         exclude_saccade_on_vis_exp=False):
+                         exclude_saccade_on_vis_exp=False, return_vis_ori_for_saccade=False):
     """
     Parameters
     ----------
 
     Returns
     -------
-
+    trial_type (saccade) : numpy ndarray
+        -1 : nasal
+        1 : temporal
     """
 
 
@@ -1253,13 +1313,32 @@ def get_aligned_activity(exp_data, exp_type='grating', aligned_event='saccade', 
     max_time = exp_times[-1]
 
     if aligned_event == 'saccade':
-        subset_exp_saccade_onset_times = exp_saccade_onset_times[
+
+        subset_saccade_trial_idx = np.where(
             (exp_saccade_onset_times + alignment_time_window[0] > min_time) &
-            (exp_saccade_onset_times + alignment_time_window[1] < max_time)
-        ]
+            (exp_saccade_onset_times + alignment_time_window[1] < max_time))[0]
+
+        subset_exp_saccade_onset_times = exp_saccade_onset_times[subset_saccade_trial_idx]
 
         aligned_activity = np.zeros((len(subset_exp_saccade_onset_times), num_time_bins, num_neurons)) + np.nan
 
+
+        # Get visual time (for getting visual identity)
+        subset_grating_onset_trial_idx = np.where(
+            (grating_onset_times + alignment_time_window[0] > min_time) &
+            (grating_onset_times + alignment_time_window[1] < max_time)
+        )[0]
+
+
+        # Get visual orientation each trial
+        grating_id_per_trial = np.array(exp_data['_gratingIds'].flatten()) - 1  # to 0 indexing
+        grating_id_per_trial = grating_id_per_trial.astype(int)
+        grating_id_to_dir = np.array(exp_data['_gratingIdDirections'].flatten())
+        grating_id_per_trial_subset = grating_id_per_trial[subset_grating_onset_trial_idx]
+        vis_ori_per_trial = np.array([grating_id_to_dir[x] for x in grating_id_per_trial_subset])
+
+        subset_grating_onset_times = grating_onset_times[subset_grating_onset_trial_idx]
+        vis_ori_during_saccade = np.zeros((len(subset_exp_saccade_onset_times), ))
         for trial_i, saccade_time in enumerate(subset_exp_saccade_onset_times):
 
             subset_idx = np.where(
@@ -1269,7 +1348,22 @@ def get_aligned_activity(exp_data, exp_type='grating', aligned_event='saccade', 
 
             aligned_activity[trial_i, :, :] = neural_activity[subset_idx, :]
 
-        return aligned_activity, trial_type, time_windows
+            # Get the vis orientation presented during each saccade (set to NaN if no visuasl stimuli)
+            vis_trial_during_saccade = np.where(
+                (saccade_time >= subset_grating_onset_times) &  # saccade occured after grating onset
+                (saccade_time <= subset_grating_onset_times + 3)  # saccade occured within 3 seconds after grating onset
+            )[0]
+
+            if len(vis_trial_during_saccade) == 0:
+                vis_ori_during_saccade[trial_i] = -1
+            else:
+                vis_ori_during_saccade[trial_i] = vis_ori_per_trial[vis_trial_during_saccade[0]]
+
+        if return_vis_ori_for_saccade:
+            trial_type = saccade_dirs[subset_saccade_trial_idx]
+            return aligned_activity, trial_type, time_windows, vis_ori_during_saccade
+        else:
+            return aligned_activity, trial_type, time_windows
 
     elif aligned_event == 'vis':
 
@@ -1584,7 +1678,9 @@ def plot_pupil_data(exp_data, exp_time_var_name='_windowVis',
     return fig, ax
 
 def impute_time_series(time_series, method='interpolate'):
+    """
 
+    """
 
     if method == 'interpolate':
 
@@ -1638,18 +1734,350 @@ def plot_grating_and_gray_exp_neuron_regression(grating_Y, gray_Y, grating_Y_hat
     return fig, axs
 
 
+
+def get_vis_and_vis_plus_saccade_activity(vis_aligned_activity, vis_aligned_activity_saccade_on,
+                                          saccade_on_trials,
+                                          vis_ori_saccade_on, vis_ori_saccade_off,
+                                          neuron_idx=0, vis_vs_vis_plus_saccade_window_width=[0, 0.5]):
+    """
+    Parameters
+    ----------
+    vis_aligned_activity : numpy ndarray
+    neuron_idx : int
+    vis_vs_vis_plus_saccade_window_width : list
+
+    """
+
+    neuron_vis_aligned_activity_saccade_off = vis_aligned_activity[:, :, neuron_idx]
+
+    all_trial_vis_only_activity = []
+    all_trials_vis_plus_saccade_activity = []
+    saccade_dir_during_vis = []
+
+    for n_trial, saccade_on_trial_idx in enumerate(saccade_on_trials):
+        trial_vis_ori = vis_ori_saccade_on[n_trial]
+
+        if np.isnan(trial_vis_ori):
+            continue
+
+        saccade_off_ori_trials = np.where(vis_ori_saccade_off == trial_vis_ori)[
+            0]  # get trials in saccade off condition with same orientation as this trial
+        neuron_vis_aligned_activity_saccade_on = vis_aligned_activity_saccade_on[n_trial, :, neuron_idx]
+
+        saccade_dir_during_vis_in_this_trial = saccade_dir_saccade_on_trials[n_trial]
+
+        for n_trial_saccade, trial_saccade_times in enumerate(saccade_time_saccade_on_trials[n_trial]):
+
+            if trial_saccade_times > 0:
+                time_window_idx = np.where(
+                    (time_windows >= trial_saccade_times + vis_vs_vis_plus_saccade_window_width[0]) &
+                    (time_windows <= trial_saccade_times + vis_vs_vis_plus_saccade_window_width[1])
+                )[0]
+
+                neuron_vis_only_activity = np.mean(
+                    neuron_vis_aligned_activity_saccade_off[saccade_off_ori_trials, :][:, time_window_idx])
+                neuron_vis_plus_saccade_activity = np.mean(neuron_vis_aligned_activity_saccade_on[time_window_idx])
+
+                # saccade_dir_within_trial = saccade_dir_during_vis_in_this_trial[n_trial_saccade]
+
+                all_trial_vis_only_activity.append(neuron_vis_only_activity)
+                all_trials_vis_plus_saccade_activity.append(neuron_vis_plus_saccade_activity)
+
+
+    return neuron_vis_only_activity, neuron_vis_plus_saccade_activity
+
+
+def get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_trials, saccade_off_trials,
+                                             vis_ori_saccade_on, vis_ori_saccade_off, saccade_dir_saccade_on_trials,
+                                             saccade_time_saccade_on_trials, time_windows,
+                                             window_width=[0, 0.5], vis_tuning_window=[0, 1]):
+    """
+    Parameters
+    -----------
+    vis_aligned_activity :
+    saccade_on_trials : numpy ndarray
+    saccade_off_trials : numpy ndarray
+    saccade_dir_saccade_on_trials : numpy ndarray
+        -1 : nasal
+        1 : temporal
+    window_width : list
+        list with 2 elements, denoting the start time and end time to take the mean activity
+
+    Returns
+    --------
+
+    time_windows : list
+        time points of the activity aligned to stimulus onset
+
+    saccade_off_ori_activity : numpy ndarray
+
+    nasal_saccade_ori_activity : numpy ndarray
+        array with dimensions (numTrial, numOri, numNeurons)
+        this contains the activity (observed vis + saccade activity subtracted by mean vis activity of that particular ori and time)
+        of all neurons (numNeurons) for individual trials (1, 2, ... numTrial) for each orientation (numOri)
+        NaNs represent trials that are missing, since different orientation have different trial counts,
+        therefore use np.nanmean and np.nanstd to do summaries
+    """
+
+    vis_aligned_activity_saccade_on = vis_aligned_activity[saccade_on_trials, :, :]
+    vis_aligned_activity_saccade_off = vis_aligned_activity[saccade_off_trials, :, :]
+    num_neuron = np.shape(vis_aligned_activity)[-1]
+
+    unique_ori, unique_ori_counts = np.unique(vis_ori_saccade_on, return_counts=True)  # why saccade on? Can be saccade off as well?
+    unique_ori = unique_ori[~np.isnan(unique_ori)]
+
+    all_unique_ori = np.unique(np.concatenate([vis_ori_saccade_on, vis_ori_saccade_off]))
+    all_unique_ori = all_unique_ori[~np.isnan(all_unique_ori)]
+
+    _, max_unique_ori_counts = sstats.mode(vis_ori_saccade_off)
+
+    saccade_off_ori_activity = np.zeros((max_unique_ori_counts[0], len(all_unique_ori), num_neuron)) + np.nan
+
+    all_vis_subtracted_activity = []
+    saccade_dir_during_vis = []
+    ori_during_saccade = []
+
+    for n_trial, saccade_on_trial_idx in enumerate(saccade_on_trials):
+        trial_vis_ori = vis_ori_saccade_on[n_trial]
+
+        if np.isnan(trial_vis_ori):
+            continue
+
+        saccade_off_ori_trials = np.where(vis_ori_saccade_off == trial_vis_ori)[
+            0]  # get trials in saccade off condition with same orientation as this trial
+
+        trial_vis_aligned_activity_saccade_on = vis_aligned_activity_saccade_on[n_trial, :, :]
+
+        saccade_dir_during_vis_in_this_trial = saccade_dir_saccade_on_trials[n_trial]
+
+        for n_trial_saccade, trial_saccade_times in enumerate(saccade_time_saccade_on_trials[n_trial]):
+
+            if trial_saccade_times > 0:
+                time_window_idx = np.where(
+                    (time_windows >= trial_saccade_times + window_width[0]) &
+                    (time_windows <= trial_saccade_times + window_width[1])
+                )[0]
+
+                vis_only_activity = np.mean(vis_aligned_activity_saccade_off[saccade_off_ori_trials, :, :][:, time_window_idx, :], axis=(0, 1))
+                trial_vis_plus_saccade_activity = np.mean(trial_vis_aligned_activity_saccade_on[time_window_idx, :], axis=0)
+
+                vis_subtracted_activity = trial_vis_plus_saccade_activity - vis_only_activity
+
+                # Append things
+                all_vis_subtracted_activity.append(vis_subtracted_activity)
+                ori_during_saccade.append(trial_vis_ori)
+                saccade_dir_during_vis.append(saccade_dir_during_vis_in_this_trial[n_trial_saccade])
+
+    # Unpack the individual trial vis subtracted saccade activity
+    ori_during_saccade = np.array(ori_during_saccade)
+    saccade_dir_during_vis = np.array(saccade_dir_during_vis)
+    all_vis_subtracted_activity = np.array(all_vis_subtracted_activity)
+
+    ori_during_nasal_saccade = ori_during_saccade[saccade_dir_during_vis == -1]
+    ori_during_temporal_saccade = ori_during_saccade[saccade_dir_during_vis == 1]
+
+    nasal_ori_mode, nasal_ori_mode_count = sstats.mode(ori_during_nasal_saccade)
+    temporal_ori_mode, temporal_ori_mode_count = sstats.mode(ori_during_temporal_saccade)
+
+    nasal_saccade_ori_activity = np.zeros((nasal_ori_mode_count[0],len(all_unique_ori), num_neuron)) + np.nan
+    temporal_saccade_ori_activity = np.zeros((temporal_ori_mode_count[0], len(all_unique_ori), num_neuron)) + np.nan
+
+    vis_time_window_idx = np.where((time_windows >= vis_tuning_window[0]) &
+                                   (time_windows <= vis_tuning_window[1])
+                                   )[0]
+
+    for ori_idx, ori in enumerate(all_unique_ori):
+
+        nasal_idx = np.where((ori_during_saccade == ori) & (saccade_dir_during_vis == -1))[0]
+        nasal_saccade_ori_activity[0:len(nasal_idx), ori_idx, :] = all_vis_subtracted_activity[nasal_idx, :]
+
+        temporal_idx = np.where((ori_during_saccade == ori) & (saccade_dir_during_vis == 1))[0]
+        temporal_saccade_ori_activity[0:len(temporal_idx), ori_idx, :] = all_vis_subtracted_activity[temporal_idx, :]
+
+        no_saccade_idx = np.where(vis_ori_saccade_off == ori)[0]
+        saccade_off_ori_activity[0:len(no_saccade_idx), ori_idx, :] = np.mean(vis_aligned_activity_saccade_off[no_saccade_idx, :, :][:, vis_time_window_idx, :], axis=1)
+
+    return saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, unique_ori
+
+
+def transform_ori_data_for_vonmises(vis_response,
+                                    ori=np.array([0., 30., 60., 90., 120., 150., 180., 210., 240., 270., 300., 330.]),
+                                    vis_response_error=None, scale_data=False):
+    """
+
+    """
+
+    vis_response_padded = np.concatenate([vis_response, np.array([vis_response[0]])])
+    ori_padded = np.concatenate([ori, np.array([360])])
+
+    if scale_data:
+        ydata = (vis_response_padded - np.min(vis_response_padded)) / np.max(vis_response_padded)
+    else:
+        ydata = vis_response_padded
+
+    xdata = np.linspace(-np.pi, np.pi, len(vis_response_padded))
+
+    if vis_response_error is None:
+        return xdata, ydata
+    else:
+        vis_response_error_padded = np.concatenate([vis_response_error, np.array([vis_response_error[0]])])
+        if scale_data:
+            ydata_error = (vis_response_error_padded - np.min(vis_response_padded)) / np.max(vis_response_padded)
+        else:
+            ydata_error = vis_response_error_padded
+
+        return xdata, ydata, ydata_error
+
+def transform_ori_data_for_vonmises2(vis_response,
+                                    ori=np.array([0., 30., 60., 90., 120., 150., 180., 210., 240., 270., 300., 330.]),
+                                    vis_response_error=None, scale_data=False):
+    """
+    Parameters
+    ----------
+    """
+
+
+    # remove NaNs (orientation with no trials)
+    not_nan_idx = np.where(~np.isnan(vis_response))
+
+    vis_response_padded = np.concatenate([vis_response, np.array([vis_response[0]])])
+    ori_padded = np.concatenate([ori, np.array([360])])
+
+    if scale_data:
+        ydata = (vis_response_padded - np.min(vis_response_padded)) / np.max(vis_response_padded)
+    else:
+        ydata = vis_response_padded
+
+    xdata = np.linspace(0, 360, len(vis_response_padded))
+
+    if vis_response_error is None:
+        return xdata[not_nan_idx], ydata[not_nan_idx]
+    else:
+        vis_response_error_padded = np.concatenate([vis_response_error, np.array([vis_response_error[0]])])
+        if scale_data:
+            ydata_error = (vis_response_error_padded - np.min(vis_response_padded)) / np.max(vis_response_padded)
+        else:
+            ydata_error = vis_response_error_padded
+
+        return xdata[not_nan_idx], ydata[not_nan_idx], ydata_error[not_nan_idx]
+
+##### SOME CIRCULAR STATISTICS FUNCTIONS ########
+
+def circ_mean(angles, deg=True):
+    '''Circular mean of angle data(default to degree)
+    '''
+    a = np.deg2rad(angles) if deg else np.array(angles)
+    angles_complex = np.frompyfunc(cmath.exp, 1, 1)(a * 1j)
+    mean = cmath.phase(angles_complex.sum()) % (2 * np.pi)
+    return round(np.rad2deg(mean) if deg else mean, 7)
+
+def circ_var(angles, deg=True):
+    '''Circular variance of angle data(default to degree)
+    0 <= var <= 1
+    '''
+    a = np.deg2rad(angles) if deg else np.array(angles)
+    angles_complex = np.frompyfunc(cmath.exp, 1, 1)(a * 1j)
+    r =abs(angles_complex.sum()) / len(angles)
+    return round(1 - r, 7)
+
+def circ_std(angles, deg=True):
+    '''Circular standard deviation of angle data(default to degree)
+    0 <= std
+    '''
+    a = np.deg2rad(angles) if deg else np.array(angles)
+    angles_complex = np.frompyfunc(cmath.exp, 1, 1)(a * 1j)
+    r = abs(angles_complex.sum()) / len(angles)
+    std = np.sqrt(-2 * np.log(r))
+    return round(np.rad2deg(std) if deg else std, 7)
+
+def circ_corrcoef(x, y, deg=True, test=False):
+    '''Circular correlation coefficient of two angle data(default to degree)
+    Set `test=True` to perform a significance test.
+    '''
+    convert = np.pi / 180.0 if deg else 1
+    sx = np.frompyfunc(np.sin, 1, 1)((x - circ_mean(x, deg)) * convert)
+    sy = np.frompyfunc(np.sin, 1, 1)((y - circ_mean(y, deg)) * convert)
+    r = (sx * sy).sum() / np.sqrt((sx ** 2).sum() * (sy ** 2).sum())
+
+    if test:
+        l20, l02, l22 = (sx ** 2).sum(),(sy ** 2).sum(), ((sx ** 2) * (sy ** 2)).sum()
+        test_stat = r * np.sqrt(l20 * l02 / l22)
+        p_value = 2 * (1 - sstats.norm.cdf(abs(test_stat)))
+        return tuple(round(v, 7) for v in (r, test_stat, p_value))
+
+    return round(r, 7)
+
+@ray.remote
+def fit_vis_ori_response(vis_response_matrix):
+
+    # do leave-one-out
+    scale_data = False
+    initial_guess = [180, 1, 1, 1, 5]
+    param_bounds = ([0, 0, 0, -np.inf, 2],  # the '2' here is the spread, roughly about 30 degrees here
+                    [360, np.inf, np.inf, np.inf, np.inf])
+    num_valid_trials = np.sum(~np.isnan(vis_response_matrix))
+    loo_errors = np.zeros((num_valid_trials,)) + np.nan
+    loo_predictions = np.zeros(np.shape(vis_response_matrix)) + np.nan
+    x_start = 0
+    x_end = 330
+    n_valid_trial = 0
+
+    for ori_idx in np.arange(np.shape(vis_response_matrix)[1]):
+        for trial_idx in np.arange(np.shape(vis_response_matrix)[0]):
+            if ~np.isnan(vis_response_matrix[trial_idx, ori_idx]):
+                loo_vis_response_matrix = vis_response_matrix.copy()
+                loo_vis_response_matrix[trial_idx, ori_idx] = np.nan  # set to NaN to exclude when calculating mean
+                loo_vis_response_mean = np.nanmean(loo_vis_response_matrix, axis=0)  # mean across trials
+                xdata, ydata = transform_ori_data_for_vonmises2(loo_vis_response_mean,
+                                                                vis_response_error=None,
+                                                                scale_data=scale_data)
+                fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
+                                                   bounds=param_bounds,
+                                                   maxfev=100000)  #50000
+                xdata_interpolated = np.arange(x_start, x_end + 1, 30)
+                # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
+                # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
+                ydata_predicted = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1],
+                                             fitted_params[2],
+                                             fitted_params[3], fitted_params[4])
+
+                loo_value = vis_response_matrix[trial_idx, ori_idx]
+                loo_ori_prediction = ydata_predicted[ori_idx]
+                loo_squared_diff = (loo_value - loo_ori_prediction) ** 2
+                loo_errors[n_valid_trial] = loo_squared_diff
+                n_valid_trial += 1
+
+                loo_predictions[trial_idx, ori_idx] = loo_ori_prediction
+
+    loo_mse = np.mean(loo_errors)
+
+    # Variance explained after averaging over trials with some orientation
+    loo_predictions_mean = np.nanmean(loo_predictions, axis=0)
+    vis_response_matrix_mean = np.nanmean(vis_response_matrix, axis=0)
+
+    # remove missing orientations
+    loo_predictions_mean = loo_predictions_mean[~np.isnan(loo_predictions_mean)]
+    vis_response_matrix_mean = vis_response_matrix_mean[~np.isnan(vis_response_matrix_mean)]
+
+    loo_variance_explained = sklmetrics.explained_variance_score(vis_response_matrix_mean, loo_predictions_mean)
+
+    return loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained
+
+
 def main():
 
     available_processes = ['load_data', 'plot_data', 'fit_regression_model', 'plot_regression_model_explained_var',
                            'plot_regression_model_example_neurons', 'compare_iterative_vs_normal_fit',
                            'plot_pupil_data', 'plot_original_vs_aligned_explained_var',
                            'plot_grating_vs_gray_screen_single_cell_fit_performance',
-                           'plot_grating_vs_gray_screen_example_neurons', 'compare_saccade_kernels',
+                           'plot_grating_vs_gray_screen_example_neurons', 'compare_saccade_kernels', 'compare_saccade_triggered_average',
                            'plot_sig_vs_nosig_neuron_explained_var', 'plot_saccade_neuron_psth_and_regression',
                            'plot_sig_model_comparison_neurons', 'plot_num_saccade_per_ori',
-                           'plot_vis_and_saccade_neuron_individual_trials']
+                           'plot_vis_and_saccade_neuron_individual_trials',
+                           'fit_saccade_ori_tuning_curves',
+                           'plot_saccade_ori_tuning_curves', 'plot_saccade_ori_preferred_ori']
 
-    processes_to_run = ['plot_vis_and_saccade_neuron_individual_trials']
+    processes_to_run = ['plot_saccade_ori_tuning_curves']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -1675,7 +2103,7 @@ def main():
                                # 'vis_on_only': ['bias', 'vis_on'],
                                # 'vis_ori': ['bias', 'vis_ori'],
                                # 'vis_ori_iterative': ['bias', 'vis_ori_iterative'],
-                               # 'vis': ['bias', 'vis_on', 'vis_dir'],
+                               'vis': ['bias', 'vis_on', 'vis_dir'],
                                # 'vis_ori_and_pupil': ['bias', 'vis_ori', 'pupil_size'],
                                # 'saccade_on_only': ['bias', 'saccade_on'],
                                'saccade': ['bias', 'saccade_on', 'saccade_dir'],
@@ -1688,11 +2116,13 @@ def main():
                                #                                           'vis_on_saccade_on']
                                },
             feature_time_windows={'vis_on': [-1.0, 3.0], 'vis_dir': [-1.0, 3.0], 'vis_ori': [-1.0, 3.0],
-                                  'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0],
+                                  # 'saccade_on': [-1.0, 3.0], 'saccade_dir': [-1.0, 3.0],
+                                  'saccade_on': [-0.5, 0.5], 'saccade_dir': [-0.5, 0.5],
                                   'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0],
                                   'pupil_size': None},
             performance_metrics=['explained_variance', 'r2'],
-            exp_type='grating',  # 'grating', 'gray', 'both'
+            aligned_explained_var_time_windows={'vis': [0, 3], 'saccade': [0, 0.5]},
+            exp_type='both',  # 'grating', 'gray', 'both'
             exclude_saccade_on_vis_exp=False,
             pupil_preprocessing_steps=['zscore'],
             train_test_split_method='n_fold_cv',   # 'half' or 'n_fold_cv'
@@ -1845,7 +2275,22 @@ def main():
         ),
         'compare_saccade_kernels': dict(
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
-            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_kernel_comparison',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_kernel_comparison-short-time-window',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            num_neurons_to_plot=10,
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                # gray screen experiments
+                                ],
+        ),
+        'compare_saccade_triggered_average': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_kernel_comparison-short-time-window',
             plot_variance_explained_comparison=False,
             gray_exp_model='saccade',
             grating_exp_model='vis_and_saccade',
@@ -1911,6 +2356,61 @@ def main():
                                 '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
                                 # gray screen experiments
                                 ],
+            plot_prefer_orientation=False,
+            plot_tuning_curves=True,
+        ),
+        'plot_vis_and_saccade_neuron_stim_and_saccade_triggered_average': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            num_neurons_to_plot=10,
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                # gray screen experiments
+                                ],
+        ),
+        'fit_saccade_ori_tuning_curves': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            save_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            num_neurons_to_plot=10,
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                # gray screen experiments
+                                ],
+            do_imputation=False,
+            run_parallel=True,
+        ),
+        'plot_saccade_ori_tuning_curves': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            num_neurons_to_plot=10,
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                # gray screen experiments
+                                ],
+            do_imputation=False,
+        ),
+        'plot_saccade_ori_preferred_ori': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            fitted_params_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
         )
     }
 
@@ -1946,9 +2446,10 @@ def main():
             regression_results_folder = process_params[process]['regression_results_folder']
             neural_preprocessing_steps = process_params[process]['neural_preprocessing_steps']
             exclude_saccade_on_vis_exp = process_params[process]['exclude_saccade_on_vis_exp']
-
+            aligned_explained_var_time_windows = process_params[process]['aligned_explained_var_time_windows']
             X_sets_to_compare = process_params[process]['X_sets_to_compare']
             performance_metrics = process_params[process]['performance_metrics']
+
             # feature_set = ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir']
 
             for exp_id, exp_data in data.items():
@@ -2018,7 +2519,7 @@ def main():
                     regression_result = get_aligned_explained_variance(regression_result, exp_data, performance_metrics=performance_metrics,
                                                                        exp_type=process_params[process]['exp_type'],
                                                                        exclude_saccade_on_vis_exp=exclude_saccade_on_vis_exp,
-                                                                       alignment_time_window=[0, 3])
+                                                                       alignment_time_window=aligned_explained_var_time_windows)
 
                     explained_var_per_X_set[:, n_X_set] = np.mean(regression_result['explained_variance_per_cv_set'], axis=1)
                     vis_aligned_explained_var_per_X_set[:, n_X_set] = regression_result['vis_aligned_var_explained']
@@ -2659,6 +3160,10 @@ def main():
 
             regression_results_folder = process_params[process]['regression_results_folder']
             fig_folder = process_params[process]['fig_folder']
+            print('Saving figures to %s' % fig_folder)
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
             plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
             grating_exp_model = process_params[process]['grating_exp_model']
             gray_exp_model = process_params[process]['gray_exp_model']
@@ -2946,9 +3451,15 @@ def main():
 
                 plt.close(fig)
 
-
                 # Get the top 10 neurons from each recording, and plot their traces
                 gray_exp_model_saccade_aligned_ev_sort_idx = np.argsort(gray_exp_model_saccade_aligned_ev)[::-1]
+
+                # Get saccade time window
+                saccade_on_kernel_idx = \
+                np.where(grating_regression_result['regression_kernel_names'] == 'saccade_on')[0][0]
+                peri_saccade_time_window = grating_regression_result['regression_kernel_windows'][saccade_on_kernel_idx]
+                num_time_frames = np.shape(gray_exp_saccade_on_weights)[1]
+                peri_saccade_time = np.linspace(peri_saccade_time_window[0], peri_saccade_time_window[1], num_time_frames)
 
                 for neuron_idx in gray_exp_model_saccade_aligned_ev_sort_idx[0:num_neurons_to_plot]:
 
@@ -2974,20 +3485,20 @@ def main():
                         axs[1].set_ylabel('Saccade dir kernel correlation', size=11)
 
                         # Lines to denote no correlation and zero variance explained
-                        [ax.axvline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
+                        [ax.axvline(0, linestyle='--', color='gray', alpha=0.25) for ax in [axs[0], axs[1]]]
                         [ax.axhline(0, linestyle='--', color='gray', alpha=0.25) for ax in axs]
 
                         # Plot saccade on temporal kernesl
-                        axs[2].plot(gray_exp_saccade_on_weights[neuron_idx, :], color='gray', label='Gray')
-                        axs[2].plot(grating_exp_saccade_on_weights[neuron_idx, :], color='black', label='Grating')
+                        axs[2].plot(peri_saccade_time, gray_exp_saccade_on_weights[neuron_idx, :], color='gray', label='Gray')
+                        axs[2].plot(peri_saccade_time, grating_exp_saccade_on_weights[neuron_idx, :], color='black', label='Grating')
                         axs[2].set_ylabel('Weights', size=11)
-                        axs[2].set_xlabel('Time (frames)', size=11)
+                        axs[2].set_xlabel('Peri-saccade time (s)', size=11)
 
                         # Plot saccade direction temporal kernel
-                        axs[3].plot(gray_exp_saccade_dir_weights[neuron_idx, :], color='gray', label='Gray')
-                        axs[3].plot(grating_exp_saccade_dir_weights[neuron_idx, :], color='black', label='Grating')
+                        axs[3].plot(peri_saccade_time, gray_exp_saccade_dir_weights[neuron_idx, :], color='gray', label='Gray')
+                        axs[3].plot(peri_saccade_time, grating_exp_saccade_dir_weights[neuron_idx, :], color='black', label='Grating')
                         axs[3].set_ylabel('Weights', size=11)
-                        axs[3].set_xlabel('Time (frames)', size=11)
+                        axs[3].set_xlabel('Peri-saccade time (s)', size=11)
                         axs[3].legend()
 
                     fig.suptitle('%s neuron %.f' % (exp_id, neuron_idx), size=11)
@@ -2995,6 +3506,10 @@ def main():
                     fig.tight_layout()
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=False)
                     plt.close(fig)
+        if process == 'compare_saccade_triggered_average':
+
+            print('Comparing saccade triggered average of neurons')
+
 
         if process == 'compare_iterative_vs_normal_fit':
 
@@ -3659,13 +4174,20 @@ def main():
                 both_model_explained_var = np.concatenate([model_a_explained_var, model_b_explained_var])
                 both_min = np.min(both_model_explained_var)
                 both_max = np.max(both_model_explained_var)
-                unity_vals = np.linspace(both_min, both_max, 100)
+                explained_var_unity_vals = np.linspace(both_min, both_max, 100)
 
                 # Get visual aligned activity of all neurons
                 vis_aligned_activity, vis_ori, saccade_dir_during_vis, saccade_time, time_windows = get_aligned_activity(
                     exp_data, exp_type='grating', aligned_event='vis',
                     alignment_time_window=[-1, 3],
                     exclude_saccade_on_vis_exp=False)
+
+                # Get saccade aligned activity of all neurons
+                saccade_aligned_activity, saccade_trial_type, saccade_aligned_time_window, vis_ori_during_saccade = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='saccade',
+                    alignment_time_window=[-1, 1],
+                    exclude_saccade_on_vis_exp=False,
+                    return_vis_ori_for_saccade=True)
 
                 saccade_on_trials = np.where([(len(x) > 0) for x in saccade_dir_during_vis])[0]
                 saccade_off_trials = np.where([(len(x) == 0) for x in saccade_dir_during_vis])[0]
@@ -3685,8 +4207,14 @@ def main():
                 vis_ori_subset = np.sort(np.unique(vis_ori[~np.isnan(vis_ori)]))
                 grating_colors = [grating_cmap(x / np.max(vis_ori_subset)) for x in vis_ori_subset]
 
+                saccade_dir_colors = {
+                    -1: 'green',  # nasal
+                    1: 'purple',  # temporal
+                }
+
                 for neuron_idx in b_minus_a_sort_idx[0:num_neurons_to_plot]:
 
+                    # Plot the explained variance and individual trials
                     with plt.style.context(splstyle.get_style('nature-reviews')):
                         fig, axs = plt.subplots(1, 3)
                         fig.set_size_inches(9, 6)
@@ -3694,7 +4222,7 @@ def main():
                         # Plot explained variance
                         axs[0].axvline(0, linestyle='--', color='gray', lw=1, alpha=0.3)
                         axs[0].axhline(0, linestyle='--', color='gray', lw=1, alpha=0.3)
-                        axs[0].plot(unity_vals, unity_vals, linestyle='--', lw=1, color='gray', alpha=0.3)
+                        axs[0].plot(explained_var_unity_vals, explained_var_unity_vals, linestyle='--', lw=1, color='gray', alpha=0.3)
                         axs[0].scatter(model_b_explained_var, model_a_explained_var, color='black', s=8)
                         axs[0].scatter(model_b_explained_var[neuron_idx], model_a_explained_var[neuron_idx], color='red', s=8)
                         axs[0].set_xlabel(model_b, size=11)
@@ -3711,7 +4239,8 @@ def main():
                                 color = grating_colors[np.where(vis_ori_subset == trial_vis_ori)[0][0]]
 
                             trial_trace = vis_aligned_activity_saccade_off[within_saccade_off_idx, :, neuron_idx]
-                            axs[1].plot(time_windows, y_offset + trial_trace, color=color, lw=1)
+                            y_vals = y_offset + trial_trace
+                            axs[1].plot(time_windows, y_vals, color=color, lw=1)
                             y_offset += np.max(trial_trace)
 
 
@@ -3731,6 +4260,7 @@ def main():
                                 color = 'gray'
                             else:
                                 color = grating_colors[np.where(vis_ori_subset == trial_vis_ori)[0][0]]
+
 
                             trial_trace = vis_aligned_activity_saccade_on[within_saccade_on_idx, :, neuron_idx]
                             axs[2].plot(time_windows, y_offset + trial_trace, color=color, lw=1)
@@ -3766,43 +4296,892 @@ def main():
                         fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
                         plt.close(fig)
 
+                    # Plot the stimulus and saccade triggered average of the neurons
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, axs = plt.subplots(2, len(vis_ori_subset), sharey=True, sharex=True)
+                        fig.set_size_inches(12, 3)
+
+                        for n_ori, ori_to_plot in enumerate(vis_ori_subset):
+                            trial_idx_within_saccade_off = np.where(vis_ori_saccade_off == ori_to_plot)[0]
+                            mean_ori_activity = np.mean(vis_aligned_activity_saccade_off[trial_idx_within_saccade_off, :, neuron_idx], axis=0)
+                            baseline_time_window_idx = np.where((time_windows >= -0.5) & (time_windows < 0))[0]
+                            baseline_activity = mean_ori_activity[baseline_time_window_idx]
+                            axs[0, n_ori].plot(time_windows, mean_ori_activity - np.mean(baseline_activity), color=grating_colors[n_ori], lw=1)
+
+                            # Plot saccade triggered average (split by saccade direction)
+                            # saccade_trials_w_ori = np.where(vis_ori_during_saccade == ori_to_plot)[0]  # -1 means no visual trial (gray screen) at all, NaN means blank is presented (also gray screen)
+                            saccade_trials_w_ori_nasal = np.where(
+                                (vis_ori_during_saccade == ori_to_plot) &
+                                (saccade_trial_type == -1)
+                            )[0]
+
+                            saccade_trials_w_ori_temporal = np.where(
+                                (vis_ori_during_saccade == ori_to_plot) &
+                                (saccade_trial_type == 1)
+                            )[0]
+
+                            if len(saccade_trials_w_ori_nasal) != 0:
+                                saccade_activity_for_ori = saccade_aligned_activity[saccade_trials_w_ori_nasal, :, neuron_idx]
+                                mean_saccade_activity_for_ori = np.mean(saccade_activity_for_ori, axis=0)
+                                saccade_baseline_time_window_idx = np.where((saccade_aligned_time_window >= -0.5) & (saccade_aligned_time_window < 0))[0]
+                                baseline_saccade_activity_for_ori = np.mean(mean_saccade_activity_for_ori[saccade_baseline_time_window_idx])
+                                axs[1, n_ori].plot(saccade_aligned_time_window, mean_saccade_activity_for_ori - baseline_saccade_activity_for_ori, color=saccade_dir_colors[-1], lw=1)
+                            if len(saccade_trials_w_ori_temporal) != 0:
+                                saccade_activity_for_ori = saccade_aligned_activity[saccade_trials_w_ori_temporal, :, neuron_idx]
+                                mean_saccade_activity_for_ori = np.mean(saccade_activity_for_ori, axis=0)
+                                saccade_baseline_time_window_idx = np.where((saccade_aligned_time_window >= -0.5) & (saccade_aligned_time_window < 0))[0]
+                                baseline_saccade_activity_for_ori = np.mean(mean_saccade_activity_for_ori[saccade_baseline_time_window_idx])
+                                axs[1, n_ori].plot(saccade_aligned_time_window, mean_saccade_activity_for_ori - baseline_saccade_activity_for_ori, color=saccade_dir_colors[1], lw=1)
+
+                            axs[0, n_ori].axvline(0, linestyle='--', lw=0.5, color='gray', alpha=0.3)
+                            axs[1, n_ori].axvline(0, linestyle='--', lw=0.5, color='gray', alpha=0.3)
+                            axs[0, n_ori].set_title('ori = %.f' % ori_to_plot, size=11)
+
+                        fig.text(0.5, 0.4, 'Visual aligned time (s)', ha='center', va='center', size=11)
+                        fig.text(0.5, 0, 'Saccade aligned time (s)', ha='center',  size=11)
+                        fig.text(0.0, 0.5, 'Neural activity', ha='center', va='center', rotation=90, size=11)
+
+                        fig.suptitle('%s neuron %.f' % (exp_id, neuron_idx), size=11)
+                        fig_name = '%s_neuron_%.f_ori_triggered_average_and_saccade_triggered_average' % (exp_id, neuron_idx)
+                        fig.tight_layout()
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+
+                    # Plot scatter of vis only vs. vis + saccade activity in particular time windows
+                    vis_vs_vis_plus_saccade_window_width = [0, 0.5]
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, ax = plt.subplots()
+                        fig.set_size_inches(4, 4)
+
+                        neuron_vis_aligned_activity_saccade_off = vis_aligned_activity[:, :, neuron_idx]
+
+                        all_trial_vis_only_activity = []
+                        all_trials_vis_plus_saccade_activity = []
+
+                        for n_trial, saccade_on_trial_idx in enumerate(saccade_on_trials):
+                            trial_vis_ori = vis_ori_saccade_on[n_trial]
+
+                            if np.isnan(trial_vis_ori):
+                                continue
+
+                            dot_color = grating_colors[np.where(vis_ori_subset == trial_vis_ori)[0][0]]
+                            saccade_off_ori_trials = np.where(vis_ori_saccade_off == trial_vis_ori)[0]  # get trials in saccade off condition with same orientation as this trial
+                            neuron_vis_aligned_activity_saccade_on = vis_aligned_activity_saccade_on[n_trial, :, neuron_idx]
+
+                            saccade_dir_during_vis_in_this_trial = saccade_dir_saccade_on_trials[n_trial]
+
+                            for n_trial_saccade, trial_saccade_times in enumerate(saccade_time_saccade_on_trials[n_trial]):
+
+                                if trial_saccade_times > 0:
+                                    time_window_idx = np.where(
+                                        (time_windows >= trial_saccade_times + vis_vs_vis_plus_saccade_window_width[0]) &
+                                        (time_windows <= trial_saccade_times + vis_vs_vis_plus_saccade_window_width[1])
+                                    )[0]
+
+                                    neuron_vis_only_activity = np.mean(neuron_vis_aligned_activity_saccade_off[saccade_off_ori_trials, :][:, time_window_idx])
+                                    neuron_vis_plus_saccade_activity = np.mean(neuron_vis_aligned_activity_saccade_on[time_window_idx])
+
+                                    saccade_dir_within_trial = saccade_dir_during_vis_in_this_trial[n_trial_saccade]
+
+                                    if saccade_dir_within_trial == -1:
+                                        marker = '<'  # nasal
+                                    elif saccade_dir_within_trial == 1:
+                                        marker = '>'  # temporal
+
+                                    all_trial_vis_only_activity.append(neuron_vis_only_activity)
+                                    all_trials_vis_plus_saccade_activity.append(neuron_vis_plus_saccade_activity)
+
+                                    # TOOD: may speed up code a bit if this is outside of a loop (prevent replotting)
+                                    ax.scatter(neuron_vis_only_activity,
+                                               neuron_vis_plus_saccade_activity,
+                                               color=dot_color,
+                                               marker=marker)
+
+                        all_vals = np.concatenate([all_trial_vis_only_activity, all_trials_vis_plus_saccade_activity])
+                        all_min = np.min(all_vals)
+                        all_max = np.max(all_vals)
+                        offset = 0.5
+                        ax.set_xlim([all_min - offset, all_max + offset])
+                        ax.set_ylim([all_min - offset, all_max + offset])
+                        unity_vals = np.linspace(all_min, all_max, 100)
+                        ax.plot(unity_vals, unity_vals, linestyle='--', color='gray', alpha=0.3)
+                        ax.set_xlabel('Vis only activity at time window', size=11)
+                        ax.set_ylabel('Vis + saccade activity at time window', size=11)
+                        ax.set_title('%s neuron %.f' % (exp_id, neuron_idx), size=11)
+                        fig_name = '%s_neuron_%.f_vis_vs_vis_plus_saccade_at_small_time_window' % (exp_id, neuron_idx)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
 
                 # Get the prefer orientation of all neurons
-                num_neurons = np.shape(vis_aligned_activity)[2]
-                mean_response_per_ori = np.zeros((len(vis_ori_subset), num_neurons))
-                for ori_i, ori in enumerate(vis_ori_subset):
-                    trial_idx = np.where(vis_ori == ori)[0]
-                    ori_activity = np.mean(vis_aligned_activity[trial_idx, :, :], axis=0)
-                    mean_response_per_ori[ori_i, :] = np.mean(ori_activity, axis=0)
+                if process_params[process]['plot_prefer_orientation']:
+                    num_neurons = np.shape(vis_aligned_activity)[2]
+                    mean_response_per_ori = np.zeros((len(vis_ori_subset), num_neurons))
+                    for ori_i, ori in enumerate(vis_ori_subset):
+                        trial_idx = np.where(vis_ori == ori)[0]
+                        ori_activity = np.mean(vis_aligned_activity[trial_idx, :, :], axis=0)
+                        mean_response_per_ori[ori_i, :] = np.mean(ori_activity, axis=0)
 
-                pref_idx_per_neuron = np.argmax(mean_response_per_ori, axis=0)
-                pref_ori_per_neuron = vis_ori_subset[pref_idx_per_neuron]
+                    pref_idx_per_neuron = np.argmax(mean_response_per_ori, axis=0)
+                    pref_ori_per_neuron = vis_ori_subset[pref_idx_per_neuron]
 
-                # Plot the prefer orientation of all the "signicicant" neurons
-                all_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron == x)[0]) for x in vis_ori_subset])
-                vis_saccade_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[subset_idx] == x)[0]) for x in vis_ori_subset])
-                vis_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[vis_subset_idx] == x)[0]) for x in vis_ori_subset])
+                    # Plot the prefer orientation of all the "signicicant" neurons
+                    all_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron == x)[0]) for x in vis_ori_subset])
+                    vis_saccade_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[subset_idx] == x)[0]) for x in vis_ori_subset])
+                    vis_neuron_num_neuron_per_ori = np.array([len(np.where(pref_ori_per_neuron[vis_subset_idx] == x)[0]) for x in vis_ori_subset])
 
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, axs = plt.subplots(1, 3, sharex=True)
+                        fig.set_size_inches(9, 3)
+                        axs[0].bar(vis_ori_subset, all_neuron_num_neuron_per_ori, lw=5, color='black')
+                        axs[1].bar(vis_ori_subset, vis_neuron_num_neuron_per_ori, lw=5, color='black')
+                        axs[2].bar(vis_ori_subset, vis_saccade_neuron_num_neuron_per_ori, lw=5, color='black')
+
+                        axs[0].set_ylabel('Number of neurons', size=11)
+                        axs[0].set_title('All neurons', size=11)
+                        axs[1].set_title('Vis neurons', size=11)
+                        axs[2].set_title('Vis + Saccade neurons', size=11)
+
+                        fig.text(0.5, 0, 'Preferred orientation', ha='center', size=11)
+                        axs[0].set_xticks([0, 90, 180, 270, 360])
+
+                        fig.suptitle('%s' % (exp_id), size=11)
+                        fig_name = '%s_neuron_preferred_orientation' % (exp_id)
+                        fig.tight_layout()
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+
+        if process == 'fit_saccade_ori_tuning_curves':
+            regression_results_folder = process_params[process]['regression_results_folder']
+            save_folder = process_params[process]['save_folder']
+
+            # plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
+            grating_exp_model = process_params[process]['grating_exp_model']
+            gray_exp_model = process_params[process]['gray_exp_model']
+            # metric_to_plot = 'explained_var_per_X_set'
+            metric_to_plot = 'saccade_aligned_var_explained'
+            do_imputation = process_params[process]['do_imputation']
+            run_parallel = process_params[process]['run_parallel']
+
+            num_neurons_to_plot = process_params[process]['num_neurons_to_plot']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            # Load all experiment data
+            data = load_data(data_folder=process_params[process]['data_folder'],
+                             file_types_to_load=process_params[process]['file_types_to_load'])
+
+            # Compare the temporal profile of the saccade kernels
+            exp_type = 'both'
+
+            for exp_id in exp_ids[2:]:
+                # Experiment data
+                exp_data = data[exp_id]
+
+                regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+
+                model_a = 'vis_ori'
+                model_b = 'vis_and_saccade'
+
+                model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                b_minus_a = model_b_explained_var - model_a_explained_var
+
+                subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var > 0) &
+                    (model_b_explained_var > model_a_explained_var)
+                )[0]
+
+                vis_subset_idx = np.where(
+                    (model_a_explained_var > 0)
+                )[0]
+
+                b_minus_a_subset_sort_idx = np.argsort(b_minus_a[subset_idx])[::-1]
+                b_minus_a_sort_idx = subset_idx[b_minus_a_subset_sort_idx]
+
+                both_model_explained_var = np.concatenate([model_a_explained_var, model_b_explained_var])
+                both_min = np.min(both_model_explained_var)
+                both_max = np.max(both_model_explained_var)
+                explained_var_unity_vals = np.linspace(both_min, both_max, 100)
+
+                # Get visual aligned activity of all neurons
+                vis_aligned_activity, vis_ori, saccade_dir_during_vis, saccade_time, time_windows = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='vis',
+                    alignment_time_window=[-1, 3],
+                    exclude_saccade_on_vis_exp=False)
+
+                # Get saccade aligned activity of all neurons
+                saccade_aligned_activity, saccade_trial_type, saccade_aligned_time_window, vis_ori_during_saccade = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='saccade',
+                    alignment_time_window=[-1, 1],
+                    exclude_saccade_on_vis_exp=False,
+                    return_vis_ori_for_saccade=True)
+
+                saccade_on_trials = np.where([(len(x) > 0) for x in saccade_dir_during_vis])[0]
+                saccade_off_trials = np.where([(len(x) == 0) for x in saccade_dir_during_vis])[0]
+                saccade_time_saccade_on_trials = [x for x in saccade_time if len(x) > 0]
+                saccade_dir_saccade_on_trials = [x for x in saccade_dir_during_vis if len(x) > 0]
+
+                vis_aligned_activity_saccade_off = vis_aligned_activity[saccade_off_trials, :, :]
+                vis_aligned_activity_saccade_on = vis_aligned_activity[saccade_on_trials, :, :]
+
+                vis_ori_saccade_off = vis_ori[saccade_off_trials]
+                vis_ori_saccade_on = vis_ori[saccade_on_trials]
+
+                vis_ori_saccade_on_sort_idx = np.argsort(vis_ori_saccade_on)
+                vis_ori_saccade_off_sort_idx = np.argsort(vis_ori_saccade_off)
+
+                grating_cmap = mpl.cm.get_cmap(name='viridis')
+                vis_ori_subset = np.sort(np.unique(vis_ori[~np.isnan(vis_ori)]))
+                grating_colors = [grating_cmap(x / np.max(vis_ori_subset)) for x in vis_ori_subset]
+
+                saccade_dir_colors = {
+                    -1: 'green',  # nasal
+                    1: 'purple',  # temporal
+                }
+
+                # Output is of shape (Trial, Ori, Neurons)
+                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups = \
+                    get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_trials,
+                                                             saccade_off_trials,
+                                                             vis_ori_saccade_on, vis_ori_saccade_off,
+                                                             saccade_dir_saccade_on_trials,
+                                                             saccade_time_saccade_on_trials, time_windows,
+                                                             window_width=[0, 0.5], vis_tuning_window=[0, 1])
+
+                plot_fits = True
+                include_explained_variance = True
+                include_error_bars = True
+                scale_data = False  # whether to scale the visual repsonse (not needed for von-mesis2 function)
+
+                von_mises_explained_variance = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
+                von_mises_fitted_loc = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
+                num_params = 5
+                von_mises_fitted_params = np.zeros((len(b_minus_a_sort_idx), num_params, 3)) + np.nan
+                vis_condition_names = ['vis_only', 'nasal', 'temporal']
+                num_vis_conditions = len(vis_condition_names)
+                loo_neuron_mse = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions)) + np.nan
+                loo_neuron_variance_explained = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions)) + np.nan
+                neuron_mean_responses = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions, 12)) + np.nan
+                neuron_response_std = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions, 12)) + np.nan
+
+                exp_run_start_time = time.time()
+
+                if run_parallel:
+                    print('Running things in parallel')
+                    ray.shutdown()
+                    ray.init()
+
+                    for n_vis_response, vis_response_name in enumerate(vis_condition_names):
+                        if vis_response_name == 'vis_only':
+                            vis_response = saccade_off_ori_activity
+                        elif vis_response_name == 'nasal':
+                            vis_response = nasal_saccade_ori_activity
+                        elif vis_response_name == 'temporal':
+                            vis_response = temporal_saccade_ori_activity
+
+                        # For each visual condition, loop through each neuron
+                        fit_vis_ori_ids = [fit_vis_ori_response.remote(vis_response[:, :, neuron_idx])
+                                         for neuron_idx in b_minus_a_sort_idx]
+
+
+                        fit_vis_ori_results = ray.get(fit_vis_ori_ids)
+
+                        # Probably there is a smarter way to unpack this...
+                        for n_neuron in np.arange(len(fit_vis_ori_results)):
+                            loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained = fit_vis_ori_results[n_neuron]
+                            loo_neuron_mse[n_neuron, n_vis_response] = loo_mse
+                            loo_neuron_variance_explained[n_neuron, n_vis_response] = loo_variance_explained
+                            # neuron_mean_responses[n_neuron, n_vis_response, :] = loo_predictions_mean
+
+                    ray.shutdown()
+
+                    # Do the usual of fitting to all the data
+                    for n_neuron, neuron_idx in enumerate(b_minus_a_sort_idx):
+                        # Do leave one out cross-validation
+                        neuron_vis_only_trial_mean = np.nanmean(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_nasal_saccade_trial_mean = np.nanmean(nasal_saccade_ori_activity[:, :, neuron_idx],
+                                                                     axis=0)
+                        neuron_temporal_saccade_trial_mean = np.nanmean(temporal_saccade_ori_activity[:, :, neuron_idx],
+                                                                        axis=0)
+
+                        neuron_vis_only_trial_std = np.nanstd(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_nasal_saccade_trial_std = np.nanstd(nasal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_temporal_saccade_trial_std = np.nanstd(temporal_saccade_ori_activity[:, :, neuron_idx],
+                                                                      axis=0)
+
+                        vis_response_to_fit = [neuron_vis_only_trial_mean, neuron_nasal_saccade_trial_mean,
+                                               neuron_temporal_saccade_trial_mean]
+                        vis_response_error = [neuron_vis_only_trial_std, neuron_nasal_saccade_trial_std,
+                                              neuron_temporal_saccade_trial_std]
+                        try:
+                            neuron_mean_responses[n_neuron, :, :] = np.array(vis_response_to_fit)
+                            neuron_response_std[n_neuron, :, :] = np.array(vis_response_error)
+                        except:
+                            pdb.set_trace()
+                        
+                        for n_vis_response, vis_response in enumerate(vis_response_to_fit):
+
+                            xdata, ydata, ydata_error = transform_ori_data_for_vonmises2(vis_response,
+                                                                                         vis_response_error=
+                                                                                         vis_response_error[
+                                                                                             n_vis_response],
+                                                                                         scale_data=scale_data)
+
+                            try:
+                                initial_guess = [180, 1, 1, 1, 1]
+                                # fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess, maxfev=2000)
+                                fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
+                                                                   bounds=([0, 0, 0, -np.inf, 0.01],
+                                                                           [360, np.inf, np.inf, np.inf, np.inf]),
+                                                                   maxfev=50000)
+                                fit_success = True
+                            except:
+                                print('Curve fitting failed')
+                                fit_success = False
+                                pdb.set_trace()
+
+                            if fit_success:
+                                xdata_interpolated = np.linspace(xdata[0], xdata[-1], 100)
+                                # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
+                                # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
+                                ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1],
+                                                             fitted_params[2],
+                                                             fitted_params[3], fitted_params[4])
+                                ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0],
+                                                                fitted_params[1], fitted_params[2],
+                                                                fitted_params[3],
+                                                                fitted_params[4])
+
+                                von_mises_explained_variance[n_neuron, n_vis_response] = \
+                                    sklmetrics.explained_variance_score(ydata, ydata_predicted)
+                                von_mises_fitted_loc[n_neuron, n_vis_response] = fitted_params[0]
+                                von_mises_fitted_params[n_neuron, :, n_vis_response] = fitted_params
+
+                else:
+
+                    for n_neuron, neuron_idx in enumerate(b_minus_a_sort_idx):
+    
+    
+                        # Do leave one out cross-validation
+                        neuron_vis_only_trial_mean = np.nanmean(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_nasal_saccade_trial_mean = np.nanmean(nasal_saccade_ori_activity[:, :, neuron_idx],
+                                                                     axis=0)
+                        neuron_temporal_saccade_trial_mean = np.nanmean(temporal_saccade_ori_activity[:, :, neuron_idx],
+                                                                        axis=0)
+    
+                        neuron_vis_only_trial_std = np.nanstd(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_nasal_saccade_trial_std = np.nanstd(nasal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_temporal_saccade_trial_std = np.nanstd(temporal_saccade_ori_activity[:, :, neuron_idx],
+                                                                      axis=0)
+    
+                        vis_response_to_fit = [neuron_vis_only_trial_mean, neuron_nasal_saccade_trial_mean,
+                                               neuron_temporal_saccade_trial_mean]
+                        vis_response_error = [neuron_vis_only_trial_std, neuron_nasal_saccade_trial_std,
+                                               neuron_temporal_saccade_trial_std]
+    
+                        neuron_mean_responses[n_neuron, :, :] = np.array(vis_response_to_fit)
+                        neuron_response_std[n_neuron, :, :] = np.array(vis_response_error)
+    
+                        for n_vis_response, vis_response_name in enumerate(vis_condition_names):
+    
+                            if vis_response_name == 'vis_only':
+                                vis_response_matrix = saccade_off_ori_activity[:, :, neuron_idx]
+                            elif vis_response_name == 'nasal':
+                                vis_response_matrix = nasal_saccade_ori_activity[:, :, neuron_idx]
+                            elif vis_response_name == 'temporal':
+                                vis_response_matrix = temporal_saccade_ori_activity[:, :, neuron_idx]
+    
+                            # do leave-one-out
+                            initial_guess = [180, 1, 1, 1, 5]
+                            param_bounds = ([0, 0, 0, -np.inf, 2],  # the '2' here is the spread, roughly about 30 degrees here
+                                            [360, np.inf, np.inf, np.inf, np.inf])
+                            num_valid_trials = np.sum(~np.isnan(vis_response_matrix))
+                            loo_errors = np.zeros((num_valid_trials, )) + np.nan
+                            loo_predictions = np.zeros(np.shape(vis_response_matrix)) + np.nan
+                            x_start = 0
+                            x_end = 330
+                            n_valid_trial = 0
+                            start_time = time.time()
+                            for ori_idx in np.arange(np.shape(vis_response_matrix)[1]):
+                                for trial_idx in np.arange(np.shape(vis_response_matrix)[0]):
+                                    if ~np.isnan(vis_response_matrix[trial_idx, ori_idx]):
+    
+                                        loo_vis_response_matrix = vis_response_matrix.copy()
+                                        loo_vis_response_matrix[trial_idx, ori_idx] = np.nan  # set to NaN to exclude when calculating mean
+                                        loo_vis_response_mean = np.nanmean(loo_vis_response_matrix, axis=0)  # mean across trials
+                                        xdata, ydata = transform_ori_data_for_vonmises2(loo_vis_response_mean,
+                                                                                                     vis_response_error=None,
+                                                                                                     scale_data=scale_data)
+                                        fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
+                                                                           bounds=param_bounds,
+                                                                           maxfev=50000)
+                                        # pdb.set_trace()
+                                        xdata_interpolated = np.arange(x_start, x_end+1, 30)
+                                        # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
+                                        # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
+                                        ydata_predicted = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1],
+                                                                     fitted_params[2],
+                                                                     fitted_params[3], fitted_params[4])
+    
+                                        loo_value = vis_response_matrix[trial_idx, ori_idx]
+                                        loo_ori_prediction = ydata_predicted[ori_idx]
+                                        loo_squared_diff = (loo_value - loo_ori_prediction) ** 2
+                                        loo_errors[n_valid_trial] = loo_squared_diff
+                                        n_valid_trial += 1
+    
+                                        loo_predictions[trial_idx, ori_idx] = loo_ori_prediction
+    
+                            end_time = time.time()
+                            print('Took %.2f seconds to do loo on %.f trials' % (end_time - start_time, n_valid_trial))
+                            loo_neuron_mse[n_neuron, n_vis_response] = np.mean(loo_errors)
+
+                            # Variance explained after averaging over trials with some orientation
+                            loo_predictions_mean = np.nanmean(loo_predictions, axis=0)
+                            vis_response_matrix_mean = np.nanmean(vis_response_matrix, axis=0)
+
+                            # remove missing orientations
+                            loo_predictions_mean = loo_predictions_mean[~np.isnan(loo_predictions_mean)]
+                            vis_response_matrix_mean = vis_response_matrix_mean[~np.isnan(vis_response_matrix_mean)]
+
+                            loo_neuron_variance_explained[n_neuron, n_vis_response] = sklmetrics.explained_variance_score(vis_response_matrix_mean, loo_predictions_mean)
+    
+                        for n_vis_response, vis_response in enumerate(vis_response_to_fit):
+    
+                            xdata, ydata, ydata_error = transform_ori_data_for_vonmises2(vis_response,
+                                                                                         vis_response_error=
+                                                                                         vis_response_error[
+                                                                                             n_vis_response],
+                                                                                         scale_data=scale_data)
+    
+                            try:
+                                initial_guess = [180, 1, 1, 1, 1]
+                                # fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess, maxfev=2000)
+                                fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
+                                                                   bounds=([0, 0, 0, -np.inf, 0.01],
+                                                                           [360, np.inf, np.inf, np.inf, np.inf]),
+                                                                   maxfev=50000)
+                                fit_success = True
+                            except:
+                                print('Curve fitting failed')
+                                fit_success = False
+                                pdb.set_trace()
+    
+    
+                            if fit_success:
+                                xdata_interpolated = np.linspace(xdata[0], xdata[-1], 100)
+                                # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
+                                # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
+                                ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1],
+                                                             fitted_params[2],
+                                                             fitted_params[3], fitted_params[4])
+                                ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0],
+                                                                fitted_params[1], fitted_params[2],
+                                                                fitted_params[3],
+                                                                fitted_params[4])
+    
+                                von_mises_explained_variance[n_neuron, n_vis_response] = \
+                                    sklmetrics.explained_variance_score(ydata, ydata_predicted)
+                                von_mises_fitted_loc[n_neuron, n_vis_response] = fitted_params[0]
+                                von_mises_fitted_params[n_neuron, :, n_vis_response] = fitted_params
+
+                exp_run_end_time = time.time()
+                exp_run_elapsed_time = exp_run_end_time - exp_run_start_time
+                # save the fits
+                save_name = '%s_von_mises_model_fit_results.npz' % exp_id
+                save_path = os.path.join(save_folder, save_name)
+                np.savez(save_path, von_mises_fitted_params=von_mises_fitted_params,
+                         loo_neuron_mse=loo_neuron_mse,
+                         loo_neuron_variance_explained=loo_neuron_variance_explained,
+                         neuron_mean_responses=neuron_mean_responses,
+                         neuron_response_std=neuron_response_std,
+                         conditions=np.array(['vis_only', 'nasal', 'temporal']),
+                         exp_run_elapsed_time=exp_run_elapsed_time)
+
+
+        if process == 'plot_saccade_ori_tuning_curves':
+
+            regression_results_folder = process_params[process]['regression_results_folder']
+            ori_fit_results_folder = '/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves'
+            fig_folder = process_params[process]['fig_folder']
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
+            plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
+            grating_exp_model = process_params[process]['grating_exp_model']
+            gray_exp_model = process_params[process]['gray_exp_model']
+            # metric_to_plot = 'explained_var_per_X_set'
+            metric_to_plot = 'saccade_aligned_var_explained'
+            do_imputation = process_params[process]['do_imputation']
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
+            num_neurons_to_plot = process_params[process]['num_neurons_to_plot']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            # Load all experiment data
+            data = load_data(data_folder=process_params[process]['data_folder'],
+                             file_types_to_load=process_params[process]['file_types_to_load'])
+
+            # Compare the temporal profile of the saccade kernels
+            exp_type = 'both'
+
+            for exp_id in exp_ids:
+                # Experiment data
+                exp_data = data[exp_id]
+
+                regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+                ori_fit_results = np.load(
+                    os.path.join(ori_fit_results_folder, '%s_von_mises_model_fit_results.npz' % exp_id)
+                )
+
+                """
+                grating_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*grating*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+                gray_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*gray*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+                """
+
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+
+                model_a = 'vis_ori'
+                model_b = 'vis_and_saccade'
+
+                model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                b_minus_a = model_b_explained_var - model_a_explained_var
+
+                subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var > 0) &
+                    (model_b_explained_var > model_a_explained_var)
+                )[0]
+
+                vis_subset_idx = np.where(
+                    (model_a_explained_var > 0)
+                )[0]
+
+                b_minus_a_subset_sort_idx = np.argsort(b_minus_a[subset_idx])[::-1]
+                b_minus_a_sort_idx = subset_idx[b_minus_a_subset_sort_idx]
+
+                both_model_explained_var = np.concatenate([model_a_explained_var, model_b_explained_var])
+                both_min = np.min(both_model_explained_var)
+                both_max = np.max(both_model_explained_var)
+                explained_var_unity_vals = np.linspace(both_min, both_max, 100)
+
+                # Get visual aligned activity of all neurons
+                vis_aligned_activity, vis_ori, saccade_dir_during_vis, saccade_time, time_windows = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='vis',
+                    alignment_time_window=[-1, 3],
+                    exclude_saccade_on_vis_exp=False)
+
+                # Get saccade aligned activity of all neurons
+                saccade_aligned_activity, saccade_trial_type, saccade_aligned_time_window, vis_ori_during_saccade = get_aligned_activity(
+                    exp_data, exp_type='grating', aligned_event='saccade',
+                    alignment_time_window=[-1, 1],
+                    exclude_saccade_on_vis_exp=False,
+                    return_vis_ori_for_saccade=True)
+
+                saccade_on_trials = np.where([(len(x) > 0) for x in saccade_dir_during_vis])[0]
+                saccade_off_trials = np.where([(len(x) == 0) for x in saccade_dir_during_vis])[0]
+                saccade_time_saccade_on_trials = [x for x in saccade_time if len(x) > 0]
+                saccade_dir_saccade_on_trials = [x for x in saccade_dir_during_vis if len(x) > 0]
+
+                vis_aligned_activity_saccade_off = vis_aligned_activity[saccade_off_trials, :, :]
+                vis_aligned_activity_saccade_on = vis_aligned_activity[saccade_on_trials, :, :]
+
+                vis_ori_saccade_off = vis_ori[saccade_off_trials]
+                vis_ori_saccade_on = vis_ori[saccade_on_trials]
+
+                vis_ori_saccade_on_sort_idx = np.argsort(vis_ori_saccade_on)
+                vis_ori_saccade_off_sort_idx = np.argsort(vis_ori_saccade_off)
+
+                grating_cmap = mpl.cm.get_cmap(name='viridis')
+                vis_ori_subset = np.sort(np.unique(vis_ori[~np.isnan(vis_ori)]))
+                grating_colors = [grating_cmap(x / np.max(vis_ori_subset)) for x in vis_ori_subset]
+
+                saccade_dir_colors = {
+                    -1: 'green',  # nasal
+                    1: 'purple',  # temporal
+                }
+
+                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups = \
+                    get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_trials, saccade_off_trials,
+                                         vis_ori_saccade_on, vis_ori_saccade_off, saccade_dir_saccade_on_trials,
+                                         saccade_time_saccade_on_trials, time_windows, window_width=[0, 0.5], vis_tuning_window=[0, 1])
+
+                plot_fits = True
+                include_explained_variance = True
+                include_error_bars = True
+                scale_data = False  # whether to scale the visual repsonse (not needed for von-mesis2 function)
+
+                von_mises_explained_variance = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
+                von_mises_fitted_loc = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
+                num_params = 5
+                von_mises_fitted_params = np.zeros((len(b_minus_a_sort_idx), num_params, 3)) + np.nan
+
+                for n_neuron, neuron_idx in enumerate(b_minus_a_sort_idx):
+                    # Plot the explained variance and individual trials
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, axs = plt.subplots(3, 1, sharex=True)
+                        fig.set_size_inches(6, 6)
+
+                        neuron_vis_only_trial_mean = np.nanmean(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_nasal_saccade_trial_mean = np.nanmean(nasal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+                        neuron_temporal_saccade_trial_mean = np.nanmean(temporal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+
+                        if include_error_bars:
+                            neuron_vis_only_trial_std = np.nanstd(saccade_off_ori_activity[:, :, neuron_idx], axis=0)
+                            neuron_nasal_saccade_trial_std = np.nanstd(nasal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+                            neuron_temporal_saccade_trial_std = np.nanstd(temporal_saccade_ori_activity[:, :, neuron_idx], axis=0)
+
+                        # Optional : do imputation
+                        if do_imputation:
+                            neuron_nasal_saccade_trial_mean[np.isnan(neuron_nasal_saccade_trial_mean)] = \
+                                np.nanmean(neuron_nasal_saccade_trial_mean)
+                            neuron_temporal_saccade_trial_mean[np.isnan(neuron_temporal_saccade_trial_mean)] = \
+                                np.nanmean(neuron_temporal_saccade_trial_mean)
+
+                        vis_response_to_fit = [neuron_vis_only_trial_mean, neuron_nasal_saccade_trial_mean, neuron_temporal_saccade_trial_mean]
+                        vis_response_error = [neuron_vis_only_trial_std, neuron_nasal_saccade_trial_std, neuron_temporal_saccade_trial_std]
+
+                        vis_titles = ['No saccade', 'Nasal saccade', 'Temporal saccade']
+                        line_colors = ['black', 'green', 'purple']
+
+                        for n_vis_response, vis_response in enumerate(vis_response_to_fit):
+
+                            if plot_fits:
+                                xdata, ydata, ydata_error = transform_ori_data_for_vonmises2(vis_response,
+                                                                        vis_response_error=vis_response_error[n_vis_response],
+                                                                        scale_data=scale_data)
+                                # initial_guess = np.array([np.pi, 1])
+                                try:
+                                    initial_guess = [180, 1, 1, 1, 1]
+                                    # fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess, maxfev=2000)
+                                    fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
+                                                                       bounds=([0, 0, 0, -np.inf, 0.01],
+                                                                                [360, np.inf, np.inf, np.inf, np.inf]),
+                                                                       maxfev=50000)
+                                    fit_success = True
+                                except:
+                                    print('Curve fitting failed')
+                                    fit_success = False
+                                    pdb.set_trace()
+
+                                axs[n_vis_response].scatter(xdata, ydata, color=line_colors[n_vis_response])
+                                axs[n_vis_response].plot(xdata, ydata, color=line_colors[n_vis_response])
+
+                                if include_error_bars:
+                                    for n_xdata in np.arange(len(xdata)):
+                                        axs[n_vis_response].plot([xdata[n_xdata], xdata[n_xdata]],
+                                                                 [ydata[n_xdata] - ydata_error[n_xdata],
+                                                                  ydata[n_xdata] + ydata_error[n_xdata]],
+                                                                 color=line_colors[n_vis_response])
+
+                                if fit_success:
+                                    xdata_interpolated = np.linspace(xdata[0], xdata[-1], 100)
+                                    # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
+                                    # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
+                                    ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1], fitted_params[2],
+                                                                 fitted_params[3], fitted_params[4])
+                                    ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0],
+                                                                    fitted_params[1], fitted_params[2], fitted_params[3],
+                                                                    fitted_params[4])
+                                    axs[n_vis_response].plot(xdata_interpolated, ydata_interpolated, linestyle='-', color='orange')
+                                    von_mises_explained_variance[n_neuron, n_vis_response] = \
+                                        sklmetrics.explained_variance_score(ydata, ydata_predicted)
+                                    von_mises_fitted_loc[n_neuron, n_vis_response] = fitted_params[0]
+                                    von_mises_fitted_params[n_neuron, :, n_vis_response] = fitted_params
+
+                                # This was in radians
+                                # axs[n_vis_response].set_xticks([xdata[0], 0, xdata[-1]])
+                                # axs[n_vis_response].set_xticklabels([r'$0$', r'$\pi$', r'$2\pi$'], size=12)
+
+                                # This is in degrees
+                                axs[n_vis_response].set_xticks([0, 180, 360])
+
+                            else:
+                                axs[n_vis_response].scatter(ori_groups, vis_response)
+
+                            if np.isnan(von_mises_explained_variance[n_neuron, n_vis_response]):
+                                title_txt = '%s $x_0 = %.2f$, EV = NaN' % (vis_titles[n_vis_response], fitted_params[0])
+                            else:
+                                title_txt = '%s $x_0 = %.2f$, EV = %.2f' % (vis_titles[n_vis_response],
+                                                                            fitted_params[0],
+                                                                            von_mises_explained_variance[n_neuron, n_vis_response])
+                            axs[n_vis_response].set_title(title_txt, size=11)
+
+                        # Do von mises fit
+                        axs[-1].set_xlabel('Vis orientation', size=11)
+
+                        if plot_fits:
+                            if scale_data:
+                                axs[1].set_ylabel('(r - min(r)) / max(r)', size=11)
+                            else:
+                                axs[1].set_ylabel('Activity (z-score)', size=11)
+
+                        fig.suptitle('%s neuron %.f' % (exp_id, neuron_idx), size=11)
+                        fig_name = '%s_neuron_%.f_orientation_tuning_saccade_off_and_on' % (exp_id, neuron_idx)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                        plt.close(fig)
+
+                # TODO: save the fits
+                save_folder = fig_folder
+                save_name = '%s_von_mises_fit_params.npy' % exp_id
+                save_path = os.path.join(save_folder, save_name)
+                np.save(save_path, von_mises_fitted_params)
+
+                # Plot summary across all neurons
                 with plt.style.context(splstyle.get_style('nature-reviews')):
-                    fig, axs = plt.subplots(1, 3, sharex=True)
-                    fig.set_size_inches(9, 3)
-                    axs[0].bar(vis_ori_subset, all_neuron_num_neuron_per_ori, lw=5, color='black')
-                    axs[1].bar(vis_ori_subset, vis_neuron_num_neuron_per_ori, lw=5, color='black')
-                    axs[2].bar(vis_ori_subset, vis_saccade_neuron_num_neuron_per_ori, lw=5, color='black')
 
-                    axs[0].set_ylabel('Number of neurons', size=11)
-                    axs[0].set_title('All neurons', size=11)
-                    axs[1].set_title('Vis neurons', size=11)
-                    axs[2].set_title('Vis + Saccade neurons', size=11)
+                    fig, axs = plt.subplots(1, 3)
+                    fig.set_size_inches(10, 3)
+                    dot_size = 10
+                    axs[0].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[0].set_xlabel('No saccade', size=11)
+                    axs[0].set_ylabel('Nasal saccade', size=11)
 
-                    fig.text(0.5, 0, 'Preferred orientation', ha='center', size=11)
-                    axs[0].set_xticks([0, 90, 180, 270, 360])
+                    axs[1].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 2], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[1].set_xlabel('No saccade', size=11)
+                    axs[1].set_ylabel('Temporal saccade', size=11)
+
+                    axs[2].scatter(von_mises_fitted_loc[:, 1], von_mises_fitted_loc[:, 2], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[2].set_xlabel('Nasal saccade', size=11)
+                    axs[2].set_ylabel('Temporal saccade', size=11)
+
+
+                    [ax.set_xlim([0, 2 * np.pi]) for ax in axs]
+                    [ax.set_ylim([0, 2 * np.pi]) for ax in axs]
+                    [ax.set_xticks([0, np.pi, 2 * np.pi]) for ax in axs]
+                    [ax.set_yticks([0, np.pi, 2 * np.pi]) for ax in axs]
+                    [ax.set_xticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
+                    [ax.set_yticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
 
                     fig.suptitle('%s' % (exp_id), size=11)
-                    fig_name = '%s_neuron_preferred_orientation' % (exp_id)
-                    fig.tight_layout()
+                    fig_name = '%s_von_mises_fitted_loc' % (exp_id)
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
                     plt.close(fig)
+
+        if process == 'plot_saccade_ori_preferred_ori':
+
+            fitted_params_folder = process_params[process]['fitted_params_folder']
+            fig_folder = process_params[process]['fig_folder']
+            regression_results_folder = process_params[process]['regression_results_folder']
+            
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            for exp_id in exp_ids:
+                fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_fit_params.npy' % exp_id)
+                von_mises_fitted_params = np.load(fitted_params_path)
+
+                # No flipping
+                # von_mises_fitted_loc = von_mises_fitted_params[:, 0, :]
+
+                # Flip the preferred orientation to the one with the greatest value of the scale parameter
+                num_stim_cond = 3
+                num_neurons = np.shape(von_mises_fitted_params)[0]
+                von_mises_fitted_loc = np.zeros((num_neurons, num_stim_cond)) + np.nan
+
+                for neuron_idx in np.arange(num_neurons):
+                    for stim_idx in np.arange(num_stim_cond):
+                        par1 = von_mises_fitted_params[neuron_idx, 0, stim_idx]
+                        par2 = von_mises_fitted_params[neuron_idx, 1, stim_idx]  # scale ori
+                        par3 = von_mises_fitted_params[neuron_idx, 2, stim_idx] # scale ori + 180
+
+                        if par2 > par3:
+                            preferred_ori = par1
+                        else:
+                            if par1 < 180:
+                                preferred_ori = par1 + 180
+                            else:
+                                preferred_ori = par1 - 180
+
+                        von_mises_fitted_loc[neuron_idx, stim_idx] = preferred_ori
+
+                # pdb.set_trace()
+                # von_mises_fitted_loc[von_mises_fitted_loc < 0] = von_mises_fitted_loc[von_mises_fitted_loc < 0] + 360
+                # von_mises_fitted_loc[von_mises_fitted_loc > 360] = von_mises_fitted_loc[von_mises_fitted_loc > 360] - 360
+
+                # Plot summary across all neurons
+                xlim = [0, 360]
+                ylim = [0, 360]
+                tick_vals = [0, 180, 360]
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, axs = plt.subplots(1, 3)
+                    fig.set_size_inches(10, 3)
+                    plt.subplots_adjust(wspace=0.35)
+                    dot_size = 20
+                    axs[0].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[0].set_xlabel('No saccade', size=11)
+                    axs[0].set_ylabel('Nasal saccade', size=11)
+
+                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], test=True)
+                    axs[0].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+                    axs[1].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 2], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[1].set_xlabel('No saccade', size=11)
+                    axs[1].set_ylabel('Temporal saccade', size=11)
+
+                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 2],
+                                                              test=True)
+                    axs[1].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+                    axs[2].scatter(von_mises_fitted_loc[:, 1], von_mises_fitted_loc[:, 2], color='black', lw=0,
+                                   s=dot_size, clip_on=False)
+                    axs[2].set_xlabel('Nasal saccade', size=11)
+                    axs[2].set_ylabel('Temporal saccade', size=11)
+
+                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 1], von_mises_fitted_loc[:, 2],
+                                                              test=True)
+                    axs[2].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+                    [ax.set_xlim(xlim) for ax in axs]
+                    [ax.set_ylim(ylim) for ax in axs]
+                    [ax.set_xticks(tick_vals) for ax in axs]
+                    [ax.set_yticks(tick_vals) for ax in axs]
+                    # [ax.set_xticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
+                    # [ax.set_yticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
+
+                    fig.suptitle('%s' % (exp_id), x=0.5, y=1.02, size=11)
+                    fig_name = '%s_von_mises_fitted_loc' % (exp_id)
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                    plt.close(fig)
+
+
 
 if __name__ == '__main__':
     main()
