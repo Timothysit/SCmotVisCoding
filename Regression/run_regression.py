@@ -16,11 +16,16 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.neighbors import KernelDensity
 import scipy.optimize as sciopt
 
+# Plotting
+
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.gridspec as gridspec
 import sciplotlib.style as splstyle
 import sciplotlib.text as spltext
+import matplotlib_venn as mpl_venn
+
+# Debugging
 import pdb  # python debugger
 
 from collections import defaultdict
@@ -37,6 +42,21 @@ import cmath  # for circular statistics
 
 # parallel processing
 import ray
+
+
+def gradient_respecting_bounds(bounds, fun, eps=1e-8):
+    """bounds: list of tuples (lower, upper)"""
+    def gradient(x):
+        fx = fun(x)
+        grad = np.zeros(len(x))
+        for k in range(len(x)):
+            d = np.zeros(len(x))
+            d[k] = eps if x[k] + eps <= bounds[k][1] else -eps
+            grad[k] = (fun(x + d) - fx) / d[k]
+        return grad
+
+    return gradient
+
 
 def von_mises(x, mu, kappa):
     return np.exp( kappa*np.cos((x - mu)) ) / (2 * np.pi * scipy.special.i0(kappa))
@@ -67,8 +87,8 @@ def von_mises2(x, par1, par2, par3, par4, par5):
 
     # kappa = 1 / kappa # 1 / kappa is approximately sigma^2 of the Guassian
 
-    s_vm_p = np.exp( kappa * (np.cos(alpha - Dp))) / (2 * np.pi * scipy.special.i0(kappa))
-    s_vm_n = np.exp( kappa * (np.cos(alpha - (Dp + np.pi)))) / (2 * np.pi * scipy.special.i0(kappa))
+    s_vm_p = np.exp( kappa * (np.cos(alpha - Dp))) / (2 * np.pi * scipy.special.ive(0, kappa))
+    s_vm_n = np.exp( kappa * (np.cos(alpha - (Dp + np.pi)))) / (2 * np.pi * scipy.special.ive(0, kappa))
 
     s_vm_p = s_vm_p / np.max(s_vm_p)
     s_vm_n = s_vm_n / np.max(s_vm_n)
@@ -76,6 +96,16 @@ def von_mises2(x, par1, par2, par3, par4, par5):
     r = Rp * s_vm_p + Rn * s_vm_n + Ro
 
     return r
+
+
+def von_mises2_loss(params, x, y):
+
+    par1, par2, par3, par4, par5 = params
+
+    y_pred = von_mises2(x, par1, par2, par3, par4, par5)
+    mse = np.nanmean((y - y_pred) ** 2)
+
+    return mse
 
 
 def load_data(data_folder, file_types_to_load=['_windowVis'],
@@ -86,22 +116,20 @@ def load_data(data_folder, file_types_to_load=['_windowVis'],
     Load data to do regression analysis
     Parameters
     -----------
-
+    data_folder : str
+        path to folder with the experiment data
     file_types_to_load : list
         list of files to load in the folder
         _windowVis : 1 x time array with the time (in seconds) of recording in the visual grating experiment
         _widowGray : 1 x time array with the time (in seconds) of recording in the gray screen experiment
-
-
-
+    exp_ids : list
+        list of experiment IDs to load
     Returns
     -------
     data : dict
         dict where each key is the ID (mouse name and exp date) of an experiment
         and each item is another dict, within that dict, the keys are the different names of the data,
         and the items are the numpy arrays containing the data
-
-
     """
 
     data = dict()
@@ -121,8 +149,6 @@ def load_data(data_folder, file_types_to_load=['_windowVis'],
             file_data = np.load(file_paths[0])
 
             data[exp_id][file_type] = file_data
-
-
 
     return data
 
@@ -1897,7 +1923,7 @@ def get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_tr
         no_saccade_idx = np.where(vis_ori_saccade_off == ori)[0]
         saccade_off_ori_activity[0:len(no_saccade_idx), ori_idx, :] = np.mean(vis_aligned_activity_saccade_off[no_saccade_idx, :, :][:, vis_time_window_idx, :], axis=1)
 
-    return saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, unique_ori
+    return saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, unique_ori, all_unique_ori
 
 
 def transform_ori_data_for_vonmises(vis_response,
@@ -2008,13 +2034,25 @@ def circ_corrcoef(x, y, deg=True, test=False):
     return round(r, 7)
 
 @ray.remote
-def fit_vis_ori_response(vis_response_matrix):
+def fit_vis_ori_response(vis_response_matrix, initial_guess=[180, 1, 1, 1, 20]):
 
     # do leave-one-out
     scale_data = False
-    initial_guess = [180, 1, 1, 1, 5]
-    param_bounds = ([0, 0, 0, -np.inf, 2],  # the '2' here is the spread, roughly about 30 degrees here
-                    [360, np.inf, np.inf, np.inf, np.inf])
+    # initial_guess = [180, 1, 1, 1, 6]  # TODO: guess deg from max response, and
+    # amplitude from max - min response amplitude,
+    # second peak (max - min) / 2
+    # baseline guess = minimal response
+    # kappa lower bound = 10
+    # kappa guess : RP * (2 - rp^2) / (1 - rp^2)
+    # Peak Bounds: to 5 times
+    param_bounds = ((0, 0, 0, -np.inf, 5),  # the '2' here is the spread, roughly about 30 degrees here
+                     (360, np.inf, np.inf, np.inf, 100))
+
+    # param_bounds = ((0, 360), (0, np.inf), (0, np.inf), (-np.inf, np.inf), (10, 1000))
+    # param_bounds = ((0, 360), (0, 100), (0, 100), (-100, 100), (10, 1000))
+
+    #  param_bounds = ((-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), (10, 1000))
+
     num_valid_trials = np.sum(~np.isnan(vis_response_matrix))
     loo_errors = np.zeros((num_valid_trials,)) + np.nan
     loo_predictions = np.zeros(np.shape(vis_response_matrix)) + np.nan
@@ -2031,9 +2069,36 @@ def fit_vis_ori_response(vis_response_matrix):
                 xdata, ydata = transform_ori_data_for_vonmises2(loo_vis_response_mean,
                                                                 vis_response_error=None,
                                                                 scale_data=scale_data)
+
                 fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
-                                                   bounds=param_bounds,
-                                                   maxfev=100000)  #50000
+                                                        bounds=param_bounds,
+                                                        maxfev=100000)  #50000
+
+                # 'dogbox' method leads to maximum number of evaluations excdeed for 100,000
+
+                # Temp hack to reinforce lower bound...
+                # if fitted_params[4] < 10:
+                #     fitted_params[4] = 10
+
+                # fitted_kappas[fitted_kappas <= 10] = 10
+                # fitted_params[:, 4] = fitted_kappas
+
+                # fitted_kappas[fitted_kappas ]
+
+                # L-BFGS-B : does not work
+                # SLSQP : also does not work
+                # fitted_params_result = spopt.minimize(von_mises2_loss, x0=initial_guess, args=(xdata, ydata),
+                #                                bounds=param_bounds, method='L-BFGS-B')
+
+                # fitted_params_result = spopt.minimize(von_mises2_loss, x0=initial_guess, args=(xdata, ydata),
+                #                                       bounds=param_bounds,
+                 #                                      jac=gradient_respecting_bounds(param_bounds, von_mises2_loss))
+
+                # fitted_params = fitted_params_result['x']
+
+                # except:
+                #     fitted_params = initial_guess
+
                 xdata_interpolated = np.arange(x_start, x_end + 1, 30)
                 # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
                 # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
@@ -2061,8 +2126,217 @@ def fit_vis_ori_response(vis_response_matrix):
 
     loo_variance_explained = sklmetrics.explained_variance_score(vis_response_matrix_mean, loo_predictions_mean)
 
-    return loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained
+    vis_response_matrix_flatten = vis_response_matrix.flatten()
+    vis_response_matrix_flatten = vis_response_matrix_flatten[~np.isnan(vis_response_matrix_flatten)]
+    loo_predictions_flatten = loo_predictions.flatten()
+    loo_predictions_flatten = loo_predictions_flatten[~np.isnan(loo_predictions_flatten)]
 
+    trial_by_trial_variance_explained = sklmetrics.explained_variance_score(vis_response_matrix_flatten, loo_predictions_flatten)
+
+    return loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained, trial_by_trial_variance_explained
+
+
+def plot_ori_grouped_raster(vis_only_response, nasal_response, temporal_response, vis_ori_sort_idx,
+                            vis_only_neuron_pref_ori=None, neuron_pref_ori_during_nasal_saccade=None,
+                            neuron_pref_ori_during_temporal_saccade=None, zscore_cmap='bwr', general_cmap='viridis',
+                            interpolation='none',
+                            zscore_ea_neuron_separately=True, divide_by_max=False, scale_to_unit_range=False,
+                            include_histogram=True, gray_nans=True, include_cbar=True,
+                            fig=None, axs=None):
+    """
+    interpolation : str
+        imshow interpolation, use 'none' to turn it off
+    zscore_cmap : str
+        options are: 'bwr', 'viridis'
+    """
+    
+    if zscore_ea_neuron_separately:
+
+        vis_only_response = sstats.zscore(vis_only_response, axis=1, nan_policy='omit')
+        nasal_response = sstats.zscore(nasal_response, axis=1, nan_policy='omit')
+        temporal_response = sstats.zscore(temporal_response, axis=1, nan_policy='omit')
+        if zscore_cmap == 'bwr':
+            cmap = mpl.cm.bwr
+        elif zscore_cmap == 'viridis':
+            cmap = mpl.cm.viridis
+    else:
+        if general_cmap == 'bwr':
+            cmap = mpl.cm.bwr
+        elif general_cmap == 'viridis':
+            cmap = mpl.cm.viridis
+
+    if divide_by_max:
+        vis_only_response = vis_only_response / np.nanmax(np.abs(vis_only_response), axis=1).reshape(-1, 1)
+        nasal_response = nasal_response / np.nanmax(np.abs(nasal_response), axis=1).reshape(-1, 1)
+        temporal_response = temporal_response / np.nanmax(np.abs(temporal_response), axis=1).reshape(-1, 1)
+
+    if scale_to_unit_range:
+        vis_only_response = (vis_only_response - np.nanmin(vis_only_response, axis=1).reshape(-1, 1)) / (
+                np.nanmax(vis_only_response, axis=1) - np.nanmin(vis_only_response, axis=1)).reshape(-1, 1)
+        nasal_response = (nasal_response - np.nanmin(nasal_response, axis=1).reshape(-1, 1)) / (
+                    np.nanmax(nasal_response, axis=1) - np.nanmin(nasal_response, axis=1)).reshape(-1, 1)
+        temporal_response = (temporal_response - np.nanmin(temporal_response, axis=1).reshape(-1, 1)) / (
+                    np.nanmax(temporal_response, axis=1) - np.nanmin(temporal_response, axis=1)).reshape(-1, 1)
+
+    if gray_nans:
+        cmap.set_bad(color='gray')
+
+    title_txt_size = 11
+    extent = [0, 360, 1, len(vis_ori_sort_idx)]
+    histogram_bins = np.arange(-30, 361, 30)
+
+    if include_histogram:
+
+        with plt.style.context(splstyle.get_style('nature-reviews')):
+            fig, axs = plt.subplots(2, 3, sharex=True, sharey=False,
+                                    gridspec_kw={'height_ratios': [1, 2]})
+            fig.set_size_inches(9, 3)
+
+            # Histograms
+            axs[0, 0].hist(vis_only_neuron_pref_ori, bins=histogram_bins, lw=1, color='black')
+            axs[0, 1].hist(neuron_pref_ori_during_nasal_saccade, bins=histogram_bins, lw=1, color='black')
+            axs[0, 2].hist(neuron_pref_ori_during_temporal_saccade, bins=histogram_bins, lw=1,
+                           color='black')
+
+            axs[0, 0].get_shared_y_axes().join(axs[0, 0], axs[0, 1])
+            axs[0, 0].get_shared_y_axes().join(axs[0, 0], axs[0, 2])
+
+            # Raster sorted by vis ori preference
+            aspect = 'auto'
+            axs[1, 0].imshow(vis_only_response, extent=extent, aspect=aspect, cmap=cmap, interpolation=interpolation)
+            axs[1, 1].imshow(nasal_response, extent=extent, aspect=aspect, cmap=cmap, interpolation=interpolation)
+            im = axs[1, 2].imshow(temporal_response, extent=extent, aspect=aspect, cmap=cmap, interpolation=interpolation)
+
+            axs[1, 0].get_shared_y_axes().join(axs[1, 0], axs[1, 1])
+            axs[1, 0].get_shared_y_axes().join(axs[1, 0], axs[1, 2])
+
+            axs[1, 0].set_yticks([1, int(len(vis_ori_sort_idx) / 2), len(vis_ori_sort_idx)])
+            axs[1, 1].set_yticks([])
+            axs[1, 2].set_yticks([])
+            axs[1, 0].set_xticks([0, 180, 360])
+
+            axs[0, 0].set_title('Vis only', size=title_txt_size)
+            axs[0, 1].set_title('Nasal saccade', size=title_txt_size)
+            axs[0, 2].set_title('Temporal saccade', size=title_txt_size)
+
+            if include_cbar:
+                cbar_ax = fig.add_axes([0.92, 0.1, 0.01, 0.48])
+                cbar_obj = fig.colorbar(im, cax=cbar_ax)
+                cbar_ax.set_ylabel('Scaled response', size=11)
+
+
+            axs[1, 0].set_ylabel('Cells', size=11)
+            fig.text(0.5, -0.04, 'Orientation (deg)', ha='center', size=11)
+
+    else:
+
+        with plt.style.context(splstyle.get_style('nature-reviews')):
+            fig, axs = plt.subplots(1, 3, sharex=True, sharey=True)
+            fig.set_size_inches(9, 3)
+            if gray_nans:
+
+                current_cmap = matplotlib.cm.get_cmap()
+                current_cmap.set_bad(color='gray')
+            axs[0].imshow(vis_only_response, extent=extent, aspect='auto', cmap=cmap)
+            axs[1].imshow(nasal_response, extent=extent, aspect='auto', cmap=cmap)
+            axs[2].imshow(temporal_response, extent=extent, aspect='auto', cmap=cmap)
+
+            axs[0].set_yticks([1, int(len(vis_ori_sort_idx) / 2), len(vis_ori_sort_idx)])
+            axs[0].set_xticks([0, 180, 360])
+
+            axs[0].set_title('Vis only', size=title_txt_size)
+            axs[1].set_title('Nasal saccade', size=title_txt_size)
+            axs[2].set_title('Temporal saccade', size=title_txt_size)
+
+
+
+            axs[0].set_ylabel('Cells', size=11)
+            fig.text(0.5, -0.04, 'Orientation (deg)', ha='center', size=11)
+    
+    
+    return fig, axs
+
+
+def plot_von_mises_fitted_loc(von_mises_fitted_loc, subset_indices=None, dot_size=20, xlim=[0, 360],
+                              ylim=[0, 360], tick_vals=[0, 180, 360],
+                              fig=None, axs=None):
+    """
+    Parameters
+    ----------
+    von_mises_fitted_loc : numpy ndarray
+        array of shape (numNeuron, 3)
+        second dimension are the different conditions
+        first column : visual only response (no saccade)
+        second column : nasal saccade response with stimulus subtracted
+        third column : temporal saccade repsonse with stimulus subtracted
+    fig : matplotlib figure object
+    axs : matplotlib axes object
+
+    """
+
+
+    with plt.style.context(splstyle.get_style('nature-reviews')):
+
+        if (fig is None) and (axs is None):
+            fig, axs = plt.subplots(1, 3)
+            fig.set_size_inches(10, 3)
+            plt.subplots_adjust(wspace=0.35)
+
+        # No saccade vs. Nasal saccade
+        if subset_indices is not None:
+            subset_idx = subset_indices[0]
+        else:
+            subset_idx = np.arange(0, np.shape(von_mises_fitted_loc)[0])
+
+        axs[0].scatter(von_mises_fitted_loc[subset_idx, 0], von_mises_fitted_loc[subset_idx, 1], color='black', lw=0,
+                       s=dot_size, clip_on=False)
+        axs[0].set_xlabel('No saccade', size=11)
+        axs[0].set_ylabel('Nasal saccade', size=11)
+
+        if np.sum(subset_idx) > 2:
+            r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[subset_idx, 0], von_mises_fitted_loc[subset_idx, 1], test=True)
+            axs[0].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+        # No saccade vs. Temporal saccade
+        if subset_indices is not None:
+            subset_idx = subset_indices[1]
+        else:
+            subset_idx = np.arange(0, np.shape(von_mises_fitted_loc)[0])
+
+        axs[1].scatter(von_mises_fitted_loc[subset_idx, 0], von_mises_fitted_loc[subset_idx, 2], color='black', lw=0,
+                       s=dot_size, clip_on=False)
+        axs[1].set_xlabel('No saccade', size=11)
+        axs[1].set_ylabel('Temporal saccade', size=11)
+
+        if np.sum(subset_idx) > 2:
+            r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[subset_idx, 0], von_mises_fitted_loc[subset_idx, 2],
+                                                      test=True)
+            axs[1].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+
+        # Nasal sasccade vs. Temporal saccade
+        if subset_indices is not None:
+            subset_idx = subset_indices[2]
+        else:
+            subset_idx = np.arange(0, np.shape(von_mises_fitted_loc)[0])
+
+        axs[2].scatter(von_mises_fitted_loc[subset_idx, 1], von_mises_fitted_loc[subset_idx, 2], color='black', lw=0,
+                       s=dot_size, clip_on=False)
+        axs[2].set_xlabel('Nasal saccade', size=11)
+        axs[2].set_ylabel('Temporal saccade', size=11)
+
+        if np.sum(subset_idx) > 2:
+            r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[subset_idx, 1], von_mises_fitted_loc[subset_idx, 2],
+                                                  test=True)
+
+            axs[2].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+
+        [ax.set_xlim(xlim) for ax in axs]
+        [ax.set_ylim(ylim) for ax in axs]
+        [ax.set_xticks(tick_vals) for ax in axs]
+        [ax.set_yticks(tick_vals) for ax in axs]
+
+    return fig, axs
 
 def main():
 
@@ -2075,9 +2349,13 @@ def main():
                            'plot_sig_model_comparison_neurons', 'plot_num_saccade_per_ori',
                            'plot_vis_and_saccade_neuron_individual_trials',
                            'fit_saccade_ori_tuning_curves',
-                           'plot_saccade_ori_tuning_curves', 'plot_saccade_ori_preferred_ori']
+                           'plot_saccade_ori_tuning_curves', 'plot_saccade_ori_preferred_ori',
+                           'plot_vis_and_saccade_response_sorted_raster',
+                           'plot_vis_neurons_vs_vis_saccade_neuron_preferred_ori',
+                           'plot_saccade_kernel_and_sign_distribution']
 
-    processes_to_run = ['plot_saccade_ori_tuning_curves']
+
+    processes_to_run = ['plot_saccade_kernel_and_sign_distribution']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -2380,6 +2658,7 @@ def main():
             plot_variance_explained_comparison=False,
             gray_exp_model='saccade',
             grating_exp_model='vis_and_saccade',
+            neurons_to_fit='all',  # 'all' or 'vis_and_saccade'
             num_neurons_to_plot=10,
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
             file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
@@ -2411,7 +2690,44 @@ def main():
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
             fitted_params_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
-        )
+            fig_exts=['.png', '.svg']
+        ),
+        'plot_vis_and_saccade_response_sorted_raster': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            fitted_params_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            sort_using='vis',  # 'vis', 'nasal' or 'temporal'
+            zscore_ea_neuron_separately=False,
+            divide_by_max=False,
+            scale_to_unit_range=True,
+            include_histogram=True,
+            only_plot_sig_neurons=True,
+            zscore_cmap='viridis',   # 'bwr', 'viridis'
+            general_cmap='viridis',
+            gray_nans=False,
+            plot_fitted_curves=True,
+        ),
+        'plot_vis_neurons_vs_vis_saccade_neuron_preferred_ori': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            fitted_params_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/vis_and_saccade_neurons/ori-tuning-curves',
+            fig_exts=['.png', '.svg']
+        ),
+        'plot_saccade_kernel_and_sign_distribution': dict(
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_neurons/weights/',
+            plot_variance_explained_comparison=False,
+            gray_exp_model='saccade',
+            grating_exp_model='vis_and_saccade',
+            file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
+                                '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
+                                '_saccadeIntervalsVis', '_pupilSizeVis',
+                                '_windowGray', '_tracesGray', '_pupilSizeGray', '_onsetOffset', '_trial_Dir',
+                                '_sigNeurons'
+                                # gray screen experiments
+                                ],
+        ),
     }
 
     print('Selected the following processes to run %s' % processes_to_run)
@@ -3969,6 +4285,95 @@ def main():
 
 
                     pdb.set_trace()
+        if process == 'plot_saccade_kernel_and_sign_distribution':
+
+            print('Loading neurons with significant explained variance using saccade model, and looking at the sign '
+                  'of their saccade response')
+
+            regression_results_folder = process_params[process]['regression_results_folder']
+            fig_folder = process_params[process]['fig_folder']
+
+            data = load_data(data_folder=process_params[process]['data_folder'],
+                             file_types_to_load=process_params[process]['file_types_to_load'])
+
+            for exp_id, exp_data in data.items():
+                grating_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*grating*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+                gray_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*gray*.npz' % (exp_id)))[0],
+                    allow_pickle=True)
+
+                both_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, 'both')))[0],
+                    allow_pickle=True)
+
+
+                gray_exp_sig_saccade_neurons = exp_data['_sigNeurons'].flatten()
+                gray_exp_sig_saccade_neurons = np.array([int(x) for x in gray_exp_sig_saccade_neurons])
+
+                grating_exp_saccade_dir_model_idx = np.where(
+                    grating_regression_result['X_sets_names'] == 'saccade'
+                )[0][0]
+
+                gray_exp_saccade_dir_model_idx = np.where(
+                    gray_regression_result['X_sets_names'] == 'saccade'
+                )[0][0]
+
+
+
+                grating_exp_saccade_dir_explained_var = grating_regression_result['explained_var_per_X_set'][:,
+                                                        grating_exp_saccade_dir_model_idx]
+                gray_exp_saccade_dir_explained_var = gray_regression_result['explained_var_per_X_set'][:,
+                                                     gray_exp_saccade_dir_model_idx]
+
+                gray_exp_sig_saccade_dir_neuron_idx = np.where(gray_exp_saccade_dir_explained_var > 0)[0]
+
+                gray_exp_saccade_aligned_full = gray_regression_result['Y_saccade_aligned_full']
+                gray_exp_saccade_dir = gray_regression_result['saccade_dirs']
+                nasal_idx = np.where(gray_exp_saccade_dir == -1)[0]
+                temporal_idx = np.where(gray_exp_saccade_dir == 1)[0]
+                gray_regression_kernel_names = gray_regression_result['regression_kernel_names']
+                gray_regression_kernel_windows = gray_regression_result['regression_kernel_windows']
+
+                if len(gray_exp_sig_saccade_dir_neuron_idx) > 0:
+
+                    gray_exp_saccade_model_weights = gray_regression_result['model_weights_per_X_set'].item()['saccade']
+                    gray_exp_saccade_model_weights_mean = np.mean(gray_exp_saccade_model_weights, axis=0)
+                    gray_exp_saccade_model_feature_indices = gray_regression_result['feature_indices_per_X_set'].item()['saccade']
+
+                    features_to_plot = ['bias', 'saccade_on', 'saccade_dir']
+
+                    for neuron_idx in gray_exp_sig_saccade_dir_neuron_idx:
+                        with plt.style.context(splstyle.get_style('nature-reviews')):
+                            fig, axs = plt.subplots(1, 4, sharey=True)
+                            fig.set_size_inches(12, 3)
+                            
+                            nasal_saccade_mean = np.mean(gray_exp_saccade_aligned_full[nasal_idx, :, neuron_idx], axis=0)
+                            temporal_saccade_mean = np.mean(gray_exp_saccade_aligned_full[temporal_idx, :, neuron_idx],
+                                                         axis=0)
+
+                            axs[0].plot(nasal_saccade_mean, color='green')
+                            axs[0].plot(temporal_saccade_mean, color='purple')
+
+                            for n_feature, feature_name in enumerate(features_to_plot):
+                                feature_indices = gray_exp_saccade_model_feature_indices[feature_name]
+                                if feature_name == 'bias':
+                                    axs[n_feature + 1].axhline(
+                                        gray_exp_saccade_model_weights_mean[neuron_idx, feature_indices])
+                                else:
+                                    feat_idx = np.where(gray_regression_kernel_names == feature_name)[0][0]
+                                    kernel_window = gray_regression_kernel_windows[feat_idx]
+                                    kernel_t = np.linspace(kernel_window[0], kernel_window[-1], len(feature_indices))
+                                    axs[n_feature + 1].plot(kernel_t,
+                                                            gray_exp_saccade_model_weights_mean[neuron_idx, feature_indices])
+
+                            fig_name = '%s_neuron_%s_gray_exp_saccade_neuron_regression_weights' % (exp_id, neuron_idx)
+                            fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                        plt.close(fig)
+
+
         if process == 'plot_sig_model_comparison_neurons':
 
             exp_type = process_params[process]['exp_type']
@@ -4453,6 +4858,7 @@ def main():
         if process == 'fit_saccade_ori_tuning_curves':
             regression_results_folder = process_params[process]['regression_results_folder']
             save_folder = process_params[process]['save_folder']
+            neurons_to_fit = process_params[process]['neurons_to_fit']
 
             # plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
             grating_exp_model = process_params[process]['grating_exp_model']
@@ -4475,7 +4881,7 @@ def main():
             # Compare the temporal profile of the saccade kernels
             exp_type = 'both'
 
-            for exp_id in exp_ids[2:]:
+            for exp_id in exp_ids:
                 # Experiment data
                 exp_data = data[exp_id]
 
@@ -4497,11 +4903,19 @@ def main():
 
                 b_minus_a = model_b_explained_var - model_a_explained_var
 
-                subset_idx = np.where(
-                    (model_a_explained_var > 0) &
-                    (model_b_explained_var > 0) &
-                    (model_b_explained_var > model_a_explained_var)
-                )[0]
+                if neurons_to_fit == 'vis_and_saccade':
+                    subset_idx = np.where(
+                        (model_a_explained_var > 0) &
+                        (model_b_explained_var > 0) &
+                        (model_b_explained_var > model_a_explained_var)
+                    )[0]
+                elif neurons_to_fit == 'all':
+                    # fit all neurons
+                    subset_idx = np.arange(len(model_a_explained_var))
+                elif neurons_to_fit == 'vis':
+                    subset_idx = np.where(
+                        (model_a_explained_var > 0)
+                    )[0]
 
                 vis_subset_idx = np.where(
                     (model_a_explained_var > 0)
@@ -4552,7 +4966,7 @@ def main():
                 }
 
                 # Output is of shape (Trial, Ori, Neurons)
-                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups = \
+                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups, all_unique_ori = \
                     get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_trials,
                                                              saccade_off_trials,
                                                              vis_ori_saccade_on, vis_ori_saccade_off,
@@ -4563,7 +4977,7 @@ def main():
                 plot_fits = True
                 include_explained_variance = True
                 include_error_bars = True
-                scale_data = False  # whether to scale the visual repsonse (not needed for von-mesis2 function)
+                scale_data = False  # whether to scale the visual response (not needed for von-mesis2 function)
 
                 von_mises_explained_variance = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
                 von_mises_fitted_loc = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
@@ -4573,6 +4987,7 @@ def main():
                 num_vis_conditions = len(vis_condition_names)
                 loo_neuron_mse = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions)) + np.nan
                 loo_neuron_variance_explained = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions)) + np.nan
+                loo_neuron_trial_variance_explained = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions)) + np.nan
                 neuron_mean_responses = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions, 12)) + np.nan
                 neuron_response_std = np.zeros((len(b_minus_a_sort_idx), num_vis_conditions, 12)) + np.nan
 
@@ -4590,19 +5005,40 @@ def main():
                             vis_response = nasal_saccade_ori_activity
                         elif vis_response_name == 'temporal':
                             vis_response = temporal_saccade_ori_activity
+                            
+                        # Get neuron initial guess
+                        # kappa guess : RP * (2 - rp^2) / (1 - rp^2)
+                        # Peak Bounds: to 5 times
+                        vis_response_subset = vis_response[:, :, b_minus_a_sort_idx]
+                        vis_response_subset_mean = np.nanmean(vis_response_subset, axis=0)  # mean across trials
+
+                        vis_max_idx = np.argmax(vis_response_subset_mean, axis=0)
+
+                        vis_max_response = np.nanmax(vis_response_subset_mean, axis=0)
+                        vis_min_response = np.nanmin(vis_response_subset_mean, axis=0)
+
+                        neuron_init_params = np.zeros((len(b_minus_a_sort_idx), 5))
+                        neuron_init_params[:, 0] = all_unique_ori[vis_max_idx]  # preferred orientation from max response
+                        neuron_init_params[:, 1] = vis_max_response - vis_min_response  # first peak
+                        neuron_init_params[:, 2] = (vis_max_response - vis_min_response) / 2  # second peak
+                        neuron_init_params[:, 3] = vis_min_response   # baseline
+                        neuron_init_params[:, 4] = 20  # width
+
 
                         # For each visual condition, loop through each neuron
-                        fit_vis_ori_ids = [fit_vis_ori_response.remote(vis_response[:, :, neuron_idx])
-                                         for neuron_idx in b_minus_a_sort_idx]
+                        fit_vis_ori_ids = [fit_vis_ori_response.remote(vis_response[:, :, neuron_idx], neuron_init_params[idx, :])
+                                         for neuron_idx, idx in zip(b_minus_a_sort_idx, np.arange(len(b_minus_a_sort_idx)))]
 
 
                         fit_vis_ori_results = ray.get(fit_vis_ori_ids)
 
                         # Probably there is a smarter way to unpack this...
                         for n_neuron in np.arange(len(fit_vis_ori_results)):
-                            loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained = fit_vis_ori_results[n_neuron]
+                            loo_mse, loo_predictions_mean, vis_response_matrix_mean, loo_variance_explained, trial_by_trial_variance_explained = \
+                                fit_vis_ori_results[n_neuron]
                             loo_neuron_mse[n_neuron, n_vis_response] = loo_mse
                             loo_neuron_variance_explained[n_neuron, n_vis_response] = loo_variance_explained
+                            loo_neuron_trial_variance_explained[n_neuron, n_vis_response] = trial_by_trial_variance_explained
                             # neuron_mean_responses[n_neuron, n_vis_response, :] = loo_predictions_mean
 
                     ray.shutdown()
@@ -4640,11 +5076,13 @@ def main():
                                                                                          scale_data=scale_data)
 
                             try:
-                                initial_guess = [180, 1, 1, 1, 1]
+                                initial_guess = neuron_init_params[n_neuron, :]
+                                param_bounds = (
+                                (0, 0, 0, -np.inf, 5),  # the '2' here is the spread, roughly about 30 degrees here
+                                (360, np.inf, np.inf, np.inf, 100))
                                 # fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess, maxfev=2000)
                                 fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
-                                                                   bounds=([0, 0, 0, -np.inf, 0.01],
-                                                                           [360, np.inf, np.inf, np.inf, np.inf]),
+                                                                   bounds=param_bounds,
                                                                    maxfev=50000)
                                 fit_success = True
                             except:
@@ -4705,8 +5143,8 @@ def main():
     
                             # do leave-one-out
                             initial_guess = [180, 1, 1, 1, 5]
-                            param_bounds = ([0, 0, 0, -np.inf, 2],  # the '2' here is the spread, roughly about 30 degrees here
-                                            [360, np.inf, np.inf, np.inf, np.inf])
+                            param_bounds = ([0, 0, 0, -np.inf, 5],  # the '2' here is the spread, roughly about 30 degrees here
+                                            [360, np.inf, np.inf, np.inf, 100])
                             num_valid_trials = np.sum(~np.isnan(vis_response_matrix))
                             loo_errors = np.zeros((num_valid_trials, )) + np.nan
                             loo_predictions = np.zeros(np.shape(vis_response_matrix)) + np.nan
@@ -4726,8 +5164,7 @@ def main():
                                                                                                      scale_data=scale_data)
                                         fitted_params, _ = spopt.curve_fit(von_mises2, xdata, ydata, p0=initial_guess,
                                                                            bounds=param_bounds,
-                                                                           maxfev=50000)
-                                        # pdb.set_trace()
+                                                                           maxfev=50000)  # method='dogbox'
                                         xdata_interpolated = np.arange(x_start, x_end+1, 30)
                                         # ydata_predicted = von_mises2(xdata, fitted_params[0], fitted_params[1])
                                         # ydata_interpolated = von_mises2(xdata_interpolated, fitted_params[0], fitted_params[1])
@@ -4799,11 +5236,12 @@ def main():
                 exp_run_end_time = time.time()
                 exp_run_elapsed_time = exp_run_end_time - exp_run_start_time
                 # save the fits
-                save_name = '%s_von_mises_model_fit_results.npz' % exp_id
+                save_name = '%s_%s_von_mises_model_fit_results.npz' % (exp_id, neurons_to_fit)
                 save_path = os.path.join(save_folder, save_name)
                 np.savez(save_path, von_mises_fitted_params=von_mises_fitted_params,
                          loo_neuron_mse=loo_neuron_mse,
                          loo_neuron_variance_explained=loo_neuron_variance_explained,
+                         loo_neuron_trial_variance_explained=loo_neuron_trial_variance_explained,
                          neuron_mean_responses=neuron_mean_responses,
                          neuron_response_std=neuron_response_std,
                          conditions=np.array(['vis_only', 'nasal', 'temporal']),
@@ -4841,7 +5279,7 @@ def main():
 
             # Compare the temporal profile of the saccade kernels
             exp_type = 'both'
-
+            
             for exp_id in exp_ids:
                 # Experiment data
                 exp_data = data[exp_id]
@@ -4931,7 +5369,7 @@ def main():
                     1: 'purple',  # temporal
                 }
 
-                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups = \
+                saccade_off_ori_activity, nasal_saccade_ori_activity, temporal_saccade_ori_activity, ori_groups, all_unique_ori = \
                     get_ori_grouped_vis_and_saccade_activity(vis_aligned_activity, saccade_on_trials, saccade_off_trials,
                                          vis_ori_saccade_on, vis_ori_saccade_off, saccade_dir_saccade_on_trials,
                                          saccade_time_saccade_on_trials, time_windows, window_width=[0, 0.5], vis_tuning_window=[0, 1])
@@ -4939,7 +5377,7 @@ def main():
                 plot_fits = True
                 include_explained_variance = True
                 include_error_bars = True
-                scale_data = False  # whether to scale the visual repsonse (not needed for von-mesis2 function)
+                scale_data = False  # whether to scale the visual response (not needed for von-mesis2 function)
 
                 von_mises_explained_variance = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
                 von_mises_fitted_loc = np.zeros((len(b_minus_a_sort_idx), 3)) + np.nan
@@ -4977,6 +5415,14 @@ def main():
                         for n_vis_response, vis_response in enumerate(vis_response_to_fit):
 
                             if plot_fits:
+                                
+                                xdata, ydata, ydata_error = transform_ori_data_for_vonmises2(vis_response,
+                                                                                             vis_response_error=
+                                                                                             vis_response_error[
+                                                                                                 n_vis_response],
+                                                                                             scale_data=scale_data)
+
+                                """
                                 xdata, ydata, ydata_error = transform_ori_data_for_vonmises2(vis_response,
                                                                         vis_response_error=vis_response_error[n_vis_response],
                                                                         scale_data=scale_data)
@@ -4993,6 +5439,11 @@ def main():
                                     print('Curve fitting failed')
                                     fit_success = False
                                     pdb.set_trace()
+                                """
+
+                                # Replace previous fitting with already fitted parameters
+                                fitted_params = ori_fit_results['von_mises_fitted_params'][n_neuron, :, n_vis_response]
+                                fit_success = True
 
                                 axs[n_vis_response].scatter(xdata, ydata, color=line_colors[n_vis_response])
                                 axs[n_vis_response].plot(xdata, ydata, color=line_colors[n_vis_response])
@@ -5014,8 +5465,13 @@ def main():
                                                                     fitted_params[1], fitted_params[2], fitted_params[3],
                                                                     fitted_params[4])
                                     axs[n_vis_response].plot(xdata_interpolated, ydata_interpolated, linestyle='-', color='orange')
+                                    """
                                     von_mises_explained_variance[n_neuron, n_vis_response] = \
                                         sklmetrics.explained_variance_score(ydata, ydata_predicted)
+                                    """
+                                    # replace with the leave-one-out vaariance explained
+                                    von_mises_explained_variance[n_neuron, n_vis_response] = \
+                                        ori_fit_results['loo_neuron_variance_explained'][n_neuron, n_vis_response]
                                     von_mises_fitted_loc[n_neuron, n_vis_response] = fitted_params[0]
                                     von_mises_fitted_params[n_neuron, :, n_vis_response] = fitted_params
 
@@ -5029,12 +5485,16 @@ def main():
                             else:
                                 axs[n_vis_response].scatter(ori_groups, vis_response)
 
+                            # Trial explained varaince
+                            tEV = ori_fit_results['loo_neuron_trial_variance_explained'][n_neuron, n_vis_response]
+
                             if np.isnan(von_mises_explained_variance[n_neuron, n_vis_response]):
                                 title_txt = '%s $x_0 = %.2f$, EV = NaN' % (vis_titles[n_vis_response], fitted_params[0])
                             else:
-                                title_txt = '%s $x_0 = %.2f$, EV = %.2f' % (vis_titles[n_vis_response],
+                                title_txt = '%s $x_0 = %.2f$, EV = %.2f, tEV = %.2f' % (vis_titles[n_vis_response],
                                                                             fitted_params[0],
-                                                                            von_mises_explained_variance[n_neuron, n_vis_response])
+                                                                            von_mises_explained_variance[n_neuron, n_vis_response],
+                                                                             tEV)
                             axs[n_vis_response].set_title(title_txt, size=11)
 
                         # Do von mises fit
@@ -5063,6 +5523,7 @@ def main():
                     fig, axs = plt.subplots(1, 3)
                     fig.set_size_inches(10, 3)
                     dot_size = 10
+                    pdb.set_trace()
                     axs[0].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], color='black', lw=0,
                                    s=dot_size, clip_on=False)
                     axs[0].set_xlabel('No saccade', size=11)
@@ -5091,20 +5552,36 @@ def main():
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
                     plt.close(fig)
 
+
+
+
         if process == 'plot_saccade_ori_preferred_ori':
 
             fitted_params_folder = process_params[process]['fitted_params_folder']
             fig_folder = process_params[process]['fig_folder']
             regression_results_folder = process_params[process]['regression_results_folder']
+            fig_exts = process_params[process]['fig_exts']
             
             regression_result_files = glob.glob(os.path.join(regression_results_folder,
                                                              '*%s*npz' % 'grating'))
             exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
                        regression_result_files]
 
+
+            # Store information for plotting across all experiemnts
+            all_exp_no_saccade_sig = []
+            all_exp_nasal_saccade_sig = []
+            all_exp_temporal_saccade_sig = []
+            all_exp_von_mises_fitted_loc = []
+
+            # Plot individual experiments
             for exp_id in exp_ids:
-                fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_fit_params.npy' % exp_id)
-                von_mises_fitted_params = np.load(fitted_params_path)
+                # fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_fit_params.npy' % exp_id)
+                fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_model_fit_results.npz' % exp_id)
+                model_results = np.load(fitted_params_path)
+
+                von_mises_fitted_params = model_results['von_mises_fitted_params']
+                loo_neuron_trial_variance_explained = model_results['loo_neuron_trial_variance_explained']
 
                 # No flipping
                 # von_mises_fitted_loc = von_mises_fitted_params[:, 0, :]
@@ -5135,51 +5612,407 @@ def main():
                 # von_mises_fitted_loc[von_mises_fitted_loc > 360] = von_mises_fitted_loc[von_mises_fitted_loc > 360] - 360
 
                 # Plot summary across all neurons
-                xlim = [0, 360]
-                ylim = [0, 360]
-                tick_vals = [0, 180, 360]
-                with plt.style.context(splstyle.get_style('nature-reviews')):
-                    fig, axs = plt.subplots(1, 3)
-                    fig.set_size_inches(10, 3)
-                    plt.subplots_adjust(wspace=0.35)
-                    dot_size = 20
-                    axs[0].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], color='black', lw=0,
-                                   s=dot_size, clip_on=False)
-                    axs[0].set_xlabel('No saccade', size=11)
-                    axs[0].set_ylabel('Nasal saccade', size=11)
+                fig, axs = plot_von_mises_fitted_loc(von_mises_fitted_loc, fig=None, axs=None)
+                fig.suptitle('%s' % (exp_id), x=0.5, y=1.02, size=11)
+                fig_name = '%s_von_mises_fitted_loc' % (exp_id)
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                plt.close(fig)
 
-                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 1], test=True)
-                    axs[0].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+                # Plot only the significant ones
+                no_saccade_sig = loo_neuron_trial_variance_explained[:, 0] > 0
+                nasal_saccade_sig = loo_neuron_trial_variance_explained[:, 1] > 0
+                temporal_saccade_sig = loo_neuron_trial_variance_explained[:, 2] > 0
 
-                    axs[1].scatter(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 2], color='black', lw=0,
-                                   s=dot_size, clip_on=False)
-                    axs[1].set_xlabel('No saccade', size=11)
-                    axs[1].set_ylabel('Temporal saccade', size=11)
+                no_saccade_or_nasal_sig = no_saccade_sig + nasal_saccade_sig
+                no_saccade_or_temp_sig = no_saccade_sig + temporal_saccade_sig
+                nasal_or_temp_sig = temporal_saccade_sig + nasal_saccade_sig
 
-                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 0], von_mises_fitted_loc[:, 2],
-                                                              test=True)
-                    axs[1].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+                no_saccade_and_nasal_sig = no_saccade_sig & nasal_saccade_sig
+                no_saccade_and_temp_sig = no_saccade_sig & temporal_saccade_sig
+                nasal_and_temp_sig = temporal_saccade_sig & nasal_saccade_sig
 
-                    axs[2].scatter(von_mises_fitted_loc[:, 1], von_mises_fitted_loc[:, 2], color='black', lw=0,
-                                   s=dot_size, clip_on=False)
-                    axs[2].set_xlabel('Nasal saccade', size=11)
-                    axs[2].set_ylabel('Temporal saccade', size=11)
+                # pdb.set_trace()
 
-                    r_val, test_stat, p_value = circ_corrcoef(von_mises_fitted_loc[:, 1], von_mises_fitted_loc[:, 2],
-                                                              test=True)
-                    axs[2].set_title(r'$r = %.2f, p = %.2f$' % (r_val, p_value), size=11)
+                # subset_indices = [no_saccade_or_nasal_sig, no_saccade_or_nasal_sig, nasal_or_temp_sig]
+                subset_indices = [no_saccade_and_nasal_sig, no_saccade_and_temp_sig, nasal_and_temp_sig]
+                fig, axs = plot_von_mises_fitted_loc(von_mises_fitted_loc, subset_indices=subset_indices, fig=None, axs=None)
+                fig.suptitle('%s' % (exp_id), x=0.5, y=1.02, size=11)
+                fig_name = '%s_von_mises_fitted_loc_sig' % (exp_id)
 
-                    [ax.set_xlim(xlim) for ax in axs]
-                    [ax.set_ylim(ylim) for ax in axs]
-                    [ax.set_xticks(tick_vals) for ax in axs]
-                    [ax.set_yticks(tick_vals) for ax in axs]
-                    # [ax.set_xticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
-                    # [ax.set_yticklabels([0, r'$\pi$', r'$2\pi$']) for ax in axs]
-
-                    fig.suptitle('%s' % (exp_id), x=0.5, y=1.02, size=11)
-                    fig_name = '%s_von_mises_fitted_loc' % (exp_id)
-                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                for ext in fig_exts:
+                    fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
                     plt.close(fig)
+
+                all_exp_von_mises_fitted_loc.append(von_mises_fitted_loc)
+                all_exp_no_saccade_sig.extend(no_saccade_sig)
+                all_exp_nasal_saccade_sig.extend(nasal_saccade_sig)
+                all_exp_temporal_saccade_sig.extend(temporal_saccade_sig)
+
+            # Plot all experiments : any neuron
+            all_exp_von_mises_fitted_loc = np.vstack(all_exp_von_mises_fitted_loc)
+            fig, axs = plot_von_mises_fitted_loc(all_exp_von_mises_fitted_loc,
+                                                 subset_indices=None, fig=None,
+                                                 axs=None)
+            fig.suptitle('All exps', x=0.5, y=1.02, size=11)
+            fig_name = 'all_exp_von_mises_fitted_loc'
+            for ext in fig_exts:
+                fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+                plt.close(fig)
+
+
+            # Plot all experiments : sig neurons
+            all_exp_no_saccade_sig = np.array(all_exp_no_saccade_sig)
+            all_exp_nasal_saccade_sig = np.array(all_exp_nasal_saccade_sig)
+            all_exp_temporal_saccade_sig = np.array(all_exp_temporal_saccade_sig)
+
+            no_saccade_and_nasal_sig = all_exp_no_saccade_sig & all_exp_nasal_saccade_sig
+            no_saccade_and_temp_sig = all_exp_no_saccade_sig & all_exp_temporal_saccade_sig
+            nasal_and_temp_sig = all_exp_temporal_saccade_sig & all_exp_nasal_saccade_sig
+            subset_indices = [no_saccade_and_nasal_sig, no_saccade_and_temp_sig, nasal_and_temp_sig]
+            
+            fig, axs = plot_von_mises_fitted_loc(all_exp_von_mises_fitted_loc, subset_indices=subset_indices, fig=None,
+                                                 axs=None)
+            fig.suptitle('All exps', x=0.5, y=1.02, size=11)
+            fig_name = 'all_exp_von_mises_fitted_loc_sig'
+            for ext in fig_exts:
+                fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+                plt.close(fig)
+
+
+
+
+            # Plot venn diagram of significance in each group
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, ax = plt.subplots()
+
+                set1 = set(np.where(all_exp_no_saccade_sig)[0])
+                set2 = set(np.where(all_exp_nasal_saccade_sig)[0])
+                set3 = set(np.where(all_exp_temporal_saccade_sig)[0])
+
+                v = mpl_venn.venn3([set1, set2, set3],
+                          set_labels=('Vis', 'Nasal',
+                                      'Temporal'),
+                          ax=ax)
+                fig_name = 'all_exp_sig_venn_diagram'
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+        if process == 'plot_vis_and_saccade_response_sorted_raster':
+
+            fitted_params_folder = process_params[process]['fitted_params_folder']
+            fig_folder = process_params[process]['fig_folder']
+            regression_results_folder = process_params[process]['regression_results_folder']
+            sort_using = process_params[process]['sort_using']
+            zscore_ea_neuron_separately = process_params[process]['zscore_ea_neuron_separately']
+            divide_by_max = process_params[process]['divide_by_max']
+            scale_to_unit_range = process_params[process]['scale_to_unit_range']
+            include_histogram = process_params[process]['include_histogram']
+            only_plot_sig_neurons = process_params[process]['only_plot_sig_neurons']
+            zscore_cmap = process_params[process]['zscore_cmap']
+            gray_nans = process_params[process]['gray_nans']
+            general_cmap = process_params[process]['general_cmap']
+            plot_fitted_curves = process_params[process]['plot_fitted_curves']
+
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            all_exp_cond_neuron_pref_ori = []
+            all_exp_neuron_mean_responses_subset = []
+            all_exp_neuron_pref_ori_during_nasal_saccade = []
+            all_exp_neuron_pref_ori_during_temporal_saccade = []
+
+            for exp_id in exp_ids:
+                # fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_fit_params.npy' % exp_id)
+                fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_model_fit_results.npz' % exp_id)
+                model_results = np.load(fitted_params_path)
+
+                n_neuron = np.shape(model_results['loo_neuron_mse'])[0]
+                n_vis_response = np.shape(model_results['neuron_mean_responses'])[2]
+
+                neuron_mean_responses = model_results['neuron_mean_responses']
+                fitted_params = model_results['von_mises_fitted_params']
+                loo_neuron_trial_variance_explained = model_results['loo_neuron_trial_variance_explained']
+
+                if plot_fitted_curves:
+                    n_cond = 3
+                    n_interpolated_ori = 100
+                    neuron_mean_responses = np.zeros((n_neuron, n_cond, n_interpolated_ori))
+                    xdata_interpolated = np.linspace(0, 360, n_interpolated_ori)
+                    for neuron_idx in np.arange(n_neuron):
+                        for cond_idx in [0, 1, 2]:
+                            neuron_mean_responses[neuron_idx, cond_idx, :] = von_mises2(xdata_interpolated,
+                                                 fitted_params[neuron_idx, 0, cond_idx],
+                                                 fitted_params[neuron_idx, 1, cond_idx],
+                                                 fitted_params[neuron_idx, 2, cond_idx],
+                                                 fitted_params[neuron_idx, 3, cond_idx],
+                                                 fitted_params[neuron_idx, 4, cond_idx])
+
+
+
+                if sort_using == 'vis':
+                    cond_idx = 0
+                elif sort_using == 'nasal':
+                    cond_idx = 1
+                elif sort_using == 'temporal':
+                    cond_idx = 2
+
+                cond_VE = loo_neuron_trial_variance_explained[:, cond_idx]
+
+
+                if only_plot_sig_neurons:
+                    neuron_subset_idx = np.where(cond_VE > 0)[0]
+                else:
+                    neuron_subset_idx = np.arange(0, int(n_neuron))
+
+                cond_neuron_pref_ori = fitted_params[neuron_subset_idx, 0, cond_idx]
+
+                neuron_pref_ori_during_nasal_saccade = fitted_params[neuron_subset_idx, 0, 1]
+                neuron_pref_ori_during_temporal_saccade = fitted_params[neuron_subset_idx, 0, 2]
+
+                vis_ori_sort_idx = np.argsort(cond_neuron_pref_ori)
+                neuron_mean_responses_subset = neuron_mean_responses[neuron_subset_idx, :, :].copy()
+
+                vis_only_response = neuron_mean_responses_subset[vis_ori_sort_idx, 0, :]
+                nasal_response = neuron_mean_responses_subset[vis_ori_sort_idx, 1, :]
+                temporal_response = neuron_mean_responses_subset[vis_ori_sort_idx, 2, :]
+
+                # Add information to all experiments store
+                all_exp_cond_neuron_pref_ori.extend(cond_neuron_pref_ori)
+                all_exp_neuron_mean_responses_subset.append(neuron_mean_responses_subset)
+                all_exp_neuron_pref_ori_during_nasal_saccade.extend(neuron_pref_ori_during_nasal_saccade)
+                all_exp_neuron_pref_ori_during_temporal_saccade.extend(neuron_pref_ori_during_temporal_saccade)
+                
+                fig, axs = plot_ori_grouped_raster(vis_only_response, nasal_response, 
+                                                   temporal_response, vis_ori_sort_idx,
+                                                   vis_only_neuron_pref_ori=cond_neuron_pref_ori,
+                                                   neuron_pref_ori_during_nasal_saccade=neuron_pref_ori_during_nasal_saccade,
+                                                   neuron_pref_ori_during_temporal_saccade=neuron_pref_ori_during_temporal_saccade,
+                                                   zscore_ea_neuron_separately=zscore_ea_neuron_separately,
+                                                   include_histogram=include_histogram,
+                                                   zscore_cmap=zscore_cmap, general_cmap=general_cmap,
+                                                   divide_by_max=divide_by_max, scale_to_unit_range=scale_to_unit_range,
+                                                   gray_nans=gray_nans, fig=None, axs=None)
+
+                fig.suptitle(exp_id, size=11, y=1.04)
+                fig_name = '%s_vis_and_saccade_raster_sorted_%s' % (exp_id, sort_using)
+                if plot_fitted_curves:
+                    fig_name += '_model_fit'
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+
+            # Do the same for but for all experiments combined
+            all_exp_neuron_mean_responses_subset = np.vstack(all_exp_neuron_mean_responses_subset)
+            all_exp_vis_ori_sort_idx = np.argsort(all_exp_cond_neuron_pref_ori)
+            all_exp_vis_only_response = all_exp_neuron_mean_responses_subset[all_exp_vis_ori_sort_idx, 0, :]
+            all_exp_nasal_response = all_exp_neuron_mean_responses_subset[all_exp_vis_ori_sort_idx, 1, :]
+            all_exp_temporal_response = all_exp_neuron_mean_responses_subset[all_exp_vis_ori_sort_idx, 2, :]
+
+            fig, axs = plot_ori_grouped_raster(all_exp_vis_only_response, all_exp_nasal_response,
+                                               all_exp_temporal_response, all_exp_vis_ori_sort_idx,
+                                               vis_only_neuron_pref_ori=all_exp_cond_neuron_pref_ori,
+                                               neuron_pref_ori_during_nasal_saccade=all_exp_neuron_pref_ori_during_nasal_saccade,
+                                               neuron_pref_ori_during_temporal_saccade=all_exp_neuron_pref_ori_during_temporal_saccade,
+                                               zscore_ea_neuron_separately=zscore_ea_neuron_separately,
+                                               include_histogram=include_histogram,
+                                               zscore_cmap=zscore_cmap, general_cmap=general_cmap,
+                                               divide_by_max=divide_by_max, scale_to_unit_range=scale_to_unit_range,
+                                               fig=None, axs=None,
+                                               gray_nans=gray_nans)
+            fig.suptitle('All experiments', size=11, y=1.04)
+            fig_name = 'all_exp_vis_and_saccade_raster_sorted_%s' % sort_using
+            if plot_fitted_curves:
+                fig_name += '_model_fit'
+            fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+        
+        if process == 'plot_vis_neurons_vs_vis_saccade_neuron_preferred_ori':
+
+            fitted_params_folder = process_params[process]['fitted_params_folder']
+            fig_folder = process_params[process]['fig_folder']
+            regression_results_folder = process_params[process]['regression_results_folder']
+            fig_exts = process_params[process]['fig_exts']
+            plot_idv_exp_traces = False
+
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'grating'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            # Aggregate for all experiments
+            all_exp_prop_vis_only_neuron_best_ori = []
+            all_exp_prop_vis_and_saccade_neuron_best_ori = []
+
+            # Plot individual experiments
+            for exp_id in exp_ids:
+                # fitted_params_path = os.path.join(fitted_params_folder, '%s_von_mises_fit_params.npy' % exp_id)
+
+                # This is for all neurons (regardless of varaince explained)
+                fitted_params_path = os.path.join(fitted_params_folder, '%s_all_von_mises_model_fit_results.npz' % exp_id)
+                model_results = np.load(fitted_params_path)
+
+                von_mises_fitted_params = model_results['von_mises_fitted_params']
+                loo_neuron_trial_variance_explained = model_results['loo_neuron_trial_variance_explained']
+
+                # Load regression result and look get variance explained using vis model
+                exp_type = 'both'
+                regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+                # Plot vis neurons ori distribution, then vis + saccade neuron ori distribution
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+
+                model_a = 'vis_ori'
+                model_b = 'vis_and_saccade'
+
+                model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                b_minus_a = model_b_explained_var - model_a_explained_var
+
+                subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var > 0) &
+                    (model_b_explained_var > model_a_explained_var)
+                )[0]
+
+                vis_only_neurons_subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var <= model_a_explained_var)
+                )[0]
+
+                vis_and_saccade_neurosn_subset_idx = np.where(
+                    (model_a_explained_var > 0) &
+                    (model_b_explained_var > 0) &
+                    (model_b_explained_var > model_a_explained_var)
+                )[0]
+
+                sig_ori_fitting_idx = np.where(
+                    loo_neuron_trial_variance_explained > 0
+                )[0]
+
+                neuron_best_ori = von_mises_fitted_params[:, 0, 0]  # first 0 is to get ori, second 0 to get vis cond
+
+                vis_only_neuron_and_sig_ori_idx = np.intersect1d(vis_only_neurons_subset_idx, sig_ori_fitting_idx)
+                vis_and_saccade_neuron_and_sig_ori_idx = np.intersect1d(vis_and_saccade_neurosn_subset_idx, sig_ori_fitting_idx)
+
+                vis_only_neuron_best_ori = neuron_best_ori[vis_only_neuron_and_sig_ori_idx]
+                vis_and_saccade_neuron_best_ori = neuron_best_ori[vis_and_saccade_neuron_and_sig_ori_idx]
+
+                preferred_ori = np.sort(np.unique(neuron_best_ori))
+
+
+                best_ori_bins = np.linspace(0, 360, 30)
+                num_bins = len(best_ori_bins) - 1
+                num_vis_only_neuron_best_ori = np.zeros((num_bins, ))
+                num_vis_and_saccade_neuron_best_ori = np.zeros((num_bins, ))
+
+                # for n_ori, ori in enumerate(preferred_ori):
+                #     num_vis_only_neuron_best_ori[n_ori] = len(np.where(vis_only_neuron_best_ori == ori)[0])
+                #     num_vis_and_saccade_neuron_best_ori[n_ori] = len(np.where(vis_and_saccade_neuron_best_ori == ori)[0])
+
+                for n_bin in np.arange(len(best_ori_bins) - 1):
+                    left_edge = best_ori_bins[n_bin]
+                    right_edge = best_ori_bins[n_bin+1]
+
+                    num_vis_only_neuron_best_ori[n_bin] = len(np.where(
+                        (vis_only_neuron_best_ori >= left_edge) &
+                        (vis_only_neuron_best_ori < right_edge)
+                    )[0])
+
+                    num_vis_and_saccade_neuron_best_ori[n_bin] = len(np.where(
+                        (vis_and_saccade_neuron_best_ori >= left_edge) &
+                        (vis_and_saccade_neuron_best_ori < right_edge)
+                    )[0])
+
+                prop_vis_only_neuron_best_ori = num_vis_only_neuron_best_ori / len(vis_only_neuron_best_ori)
+                prop_vis_and_saccade_neuron_best_ori = num_vis_and_saccade_neuron_best_ori / len(vis_and_saccade_neuron_best_ori)
+
+                all_exp_prop_vis_only_neuron_best_ori.append(prop_vis_only_neuron_best_ori)
+                all_exp_prop_vis_and_saccade_neuron_best_ori.append(prop_vis_and_saccade_neuron_best_ori)
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                    fig, ax = plt.subplots()
+                    ax.plot(best_ori_bins[0:-1], prop_vis_only_neuron_best_ori, color='black', label='Vis only')
+                    ax.plot(best_ori_bins[0:-1], prop_vis_and_saccade_neuron_best_ori, color='red', label='Vis + saccade')
+                    ax.set_xlabel('Preferred visual orientation', size=11)
+                    ax.set_ylabel('Proportion of neurons', size=11)
+                    ax.set_title(exp_id, size=11)
+                    ax.legend()
+
+                    fig_name = '%s_prop_vis_only_vs_vis_and_saccade_neuron_best_ori' % exp_id
+                    for ext in fig_exts:
+                        fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+
+
+                # Plot scatter of variance explained by each model and preferred orientation
+                preferred_ori_per_neuron = neuron_best_ori.copy()
+                preferred_ori_per_neuron[loo_neuron_trial_variance_explained[:, 0] <= 0] = np.nan
+
+                # look for neurons with
+                subset_idx_weird = np.where(
+                    (model_a_explained_var < 0) & # (model_b_explained_var < 0) &
+                    (loo_neuron_trial_variance_explained[:, 0] > 0)
+                )[0]
+                # ^ a bit strange that there are neurons like this? Not explained well by vis ori model, but von mises fit is significant...
+                # will be good to plot these neurons and see what's up...
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, ax = plt.subplots()
+                    fig.set_size_inches(4, 4)
+                    cmap = mpl.cm.twilight
+                    cmap.set_bad(color='white')
+                    all_ev = np.concatenate([model_b_explained_var, model_a_explained_var])
+                    all_max = np.max(all_ev)
+                    all_min = np.min(all_ev)
+                    unity_vals = np.linspace(all_min, all_max, 100)
+                    ax.scatter(model_b_explained_var, model_a_explained_var,
+                               c=preferred_ori_per_neuron, cmap=cmap, lw=0)
+                    ax.plot(unity_vals, unity_vals, color='gray', linestyle='--', lw=0.5)
+                    ax.axhline(0, color='gray', linestyle='--', lw=0.5)
+                    ax.axvline(0, color='gray', linestyle='--', lw=0.5)
+                    ax.set_xlabel('Vis + saccade', size=11)
+                    ax.set_ylabel('Vis only', size=11)
+                    ax.set_xlim([all_min, all_max])
+                    ax.set_ylim([all_min, all_max])
+
+                    fig_name = '%s_model_ve_comparison_w_preferred_ori_colored' % exp_id
+                    for ext in fig_exts:
+                        fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+
+
+
+            # Plot for all experiments
+            all_exp_mean_prop_vis_only_neuron_best_ori = np.mean(np.array(all_exp_prop_vis_only_neuron_best_ori), axis=0)
+            all_exp_mean_prop_vis_and_saccade_neuron_best_ori = np.mean(np.array(all_exp_prop_vis_and_saccade_neuron_best_ori), axis=0)
+
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                fig, ax = plt.subplots()
+                ax.plot(best_ori_bins[0:-1], all_exp_mean_prop_vis_only_neuron_best_ori, color='black', label='Vis only')
+                ax.plot(best_ori_bins[0:-1], all_exp_mean_prop_vis_and_saccade_neuron_best_ori, color='red', label='Vis + saccade')
+
+                if plot_idv_exp_traces:
+                    for exp_vis_only_best_ori in all_exp_prop_vis_only_neuron_best_ori:
+                        ax.plot(best_ori_bins[0:-1], exp_vis_only_best_ori, color='black', alpha=0.1)
+                    for exp_vis_and_saccade_best_ori in all_exp_prop_vis_and_saccade_neuron_best_ori:
+                        ax.plot(best_ori_bins[0:-1], exp_vis_and_saccade_best_ori, color='red', alpha=0.1)
+
+                ax.set_xlabel('Preferred visual orientation', size=11)
+                ax.set_ylabel('Proportion of neurons', size=11)
+                ax.set_title('All experiments mean', size=11)
+                ax.legend()
+
+                fig_name = 'all_exp_mean_prop_vis_only_vs_vis_and_saccade_neuron_best_ori'
+                for ext in fig_exts:
+                    fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+
+
 
 
 
