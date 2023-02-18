@@ -46,6 +46,8 @@ import ray
 # Sorting / Clustering
 import rastermap
 
+import itertools
+
 
 def gradient_respecting_bounds(bounds, fun, eps=1e-8):
     """bounds: list of tuples (lower, upper)"""
@@ -538,7 +540,14 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
     sec_per_time_samples = np.mean(np.diff(exp_times))
     num_time_samples = int(len(exp_times))
 
+    if exp_type in ['gray', 'grating'] and ('z_score_separately' in neural_preprocessing_steps):
+        print('Removing z-score separately from pre-processing step because using only one experiment type')
+        # remove z-score separately if only using one experiment
+        neural_preprocessing_steps.remove('z_score_separately')
+
+
     # Make target matrix Y
+
     Y = neural_activity
     if ('zscore' in neural_preprocessing_steps) and ('z_score_separately' not in neural_preprocessing_steps):
         Y  = (Y - np.mean(Y, axis=0)) / np.std(Y, axis=0)
@@ -555,8 +564,22 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             gray_exp_iti_neural_activity_std = np.std(neural_activity[gray_exp_iti_times_idx, :], axis=0)
             Y = (neural_activity - gray_exp_iti_neural_activity_mu) / gray_exp_iti_neural_activity_std
         elif exp_type == 'vis':
-            # TODO: need to z-score with baseline
-            pdb.set_trace()
+            # Grating experiment z-scoring using ITI and baseline activity
+            vis_iti_times = vis_exp_times.copy()
+            time_after_vis_to_exclude = 3
+            time_after_saccade_to_exclude = 2
+            for onset_time in grating_onset_times:
+                vis_iti_times[
+                    (vis_exp_times >= onset_time) & (vis_exp_times <= onset_time + time_after_vis_to_exclude)] = np.nan
+            for saccade_time in vis_exp_saccade_onset_times:
+                vis_iti_times[(vis_exp_times >= saccade_time) & (
+                        vis_exp_times <= saccade_time + time_after_saccade_to_exclude)] = np.nan
+
+            vis_iti_times_idx = np.where(~np.isnan(vis_iti_times))[0]
+            vis_exp_iti_neural_activity_mu = np.mean(vis_exp_neural_activity[vis_iti_times_idx, :], axis=0)
+            vis_exp_iti_neural_activity_std = np.std(vis_exp_neural_activity[vis_iti_times_idx, :], axis=0)
+            Y = (vis_exp_neural_activity - vis_exp_iti_neural_activity_mu) / vis_exp_iti_neural_activity_std
+
 
 
     # Make X
@@ -1003,12 +1026,16 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
 
                 assert (np.abs(gray_interval_duration - gray_exp_time_duration) < 2)
 
-            elif exp_type == 'vis':
-                print('TODO')
+            elif exp_type == 'grating':
+
+                running_speed_interpolated = np.interp(x=exp_times, xp=exp_data['running_speed_timestamps'],
+                                                               fp=exp_data['running_speed'])
 
             elif exp_type == 'gray':
-
-                print('TODO')
+                gray_exp_global_time = exp_times + first_cut_off_time
+                running_speed_interpolated = np.interp(x=gray_exp_global_time,
+                                                                xp=exp_data['running_speed_timestamps'],
+                                                                fp=exp_data['running_speed'])
             
             feature_mat = running_speed_interpolated.reshape(-1, 1)
 
@@ -1449,7 +1476,9 @@ def get_aligned_explained_variance(regression_result, exp_data, alignment_time_w
                                                                         Y_hat_vis_aligned_flattened,
                                                                         multioutput='raw_values')
 
-    saccade_aligned_var_explained = sklmetrics.explained_variance_score(Y_saccade_aligned_flattened, Y_hat_saccade_aligned_flattened, multioutput='raw_values')
+    saccade_aligned_var_explained = sklmetrics.explained_variance_score(Y_saccade_aligned_flattened,
+                                                                        Y_hat_saccade_aligned_flattened,
+                                                                        multioutput='raw_values')
 
 
     if 'r2' in performance_metrics:
@@ -1843,6 +1872,41 @@ def get_saccade_trials_without_grating(exp_data):
     trial_idx = np.array(subset_trial_indices)
 
     return trial_idx
+
+def get_saccade_kernel_from_regression_result(regression_result, model_X_set_to_plot):
+    """
+    regression_result : numpy item
+    model_X_set_to_plot : str
+    """
+
+    # Get the kernels
+    model_weights_per_X_set = regression_result['model_weights_per_X_set'].item()
+    X_set_weights = model_weights_per_X_set[model_X_set_to_plot]  # numCV x numNeuron x numFeatures
+    feature_name_and_indices = regression_result['feature_indices_per_X_set'].item()[model_X_set_to_plot]
+    regression_kernel_windows = regression_result['regression_kernel_windows']
+    saccade_on_kernel_idx = np.where(regression_result['regression_kernel_names'] == 'saccade_on')[0][0]
+    saccade_on_window = regression_kernel_windows[saccade_on_kernel_idx]
+
+    saccade_onset_kernel_indices = feature_name_and_indices['saccade_on']
+    saccade_dir_kernel_indices = feature_name_and_indices['saccade_dir']
+
+    saccade_on_kernels = np.mean(X_set_weights[:, :, :][:, :, saccade_onset_kernel_indices], axis=0)
+    saccade_dir_kernels = np.mean(X_set_weights[:, :, :][:, :, saccade_dir_kernel_indices], axis=0)
+
+    saccade_on_peri_event_window = np.linspace(saccade_on_window[0], saccade_on_window[1],
+                                               len(saccade_onset_kernel_indices))
+    post_saccade_idx = np.where(saccade_on_peri_event_window >= 0)[0]
+
+
+    saccade_nasal_kernels = saccade_on_kernels - saccade_dir_kernels
+    saccade_nasal_kernels_post_saccade_mean = np.mean(saccade_nasal_kernels[:, post_saccade_idx], axis=1)
+
+    # get only post-saccade time window
+    saccade_temporal_kernels = saccade_on_kernels + saccade_dir_kernels
+    saccade_temporal_kernels_post_saccade_mean = np.mean(saccade_temporal_kernels[:, post_saccade_idx],
+                                                         axis=1)
+
+    return saccade_nasal_kernels_post_saccade_mean, saccade_temporal_kernels_post_saccade_mean
 
 def plot_pupil_data(exp_data, exp_time_var_name='_windowVis',
                     pupil_size_var_name='pupilSizeVis', highlight_nans=False, run_impute_time_series=False,
@@ -2456,44 +2520,100 @@ def plot_ori_grouped_raster(vis_only_response, nasal_response, temporal_response
     
     return fig, axs
 
-def get_Anya_raster_sort_idx(temporal_response_per_neuron, nasal_response_per_neuron):
+def get_Anya_raster_sort_idx(temporal_response_per_t_neuron, nasal_response_per_t_neuron,
+                             excited_threshold=0.5, inhibited_threshold=-0.5):
 
-    excited_threshold = 0.5
-    inhibited_threshold = -0.5
+    """
+    Get indices for sorting neurons based on the same way Anya did it in Figure 2
+    Parameters
+    ----------
+    temporal_response_per_t_neuron : numpy ndarray
+    nasal_response_per_t_neuron : numpy ndarray
+    excited_threshold : float
+    inhibited_threshold : float
+
+    Returns
+    -------
+    sort_idx : numpy ndarray
+    """
+
+    temporal_response_per_neuron = np.mean(temporal_response_per_t_neuron, axis=1)
+    nasal_response_per_neuron = np.mean(nasal_response_per_t_neuron, axis=1)
 
     temporal_e_nasal_null_idx = np.where(
         (temporal_response_per_neuron >= excited_threshold) &
         (np.abs(nasal_response_per_neuron) < excited_threshold)
     )[0]
 
+    # sort the temporal e nasal null idx, by location of maximum response
+    temporal_e_nasal_null_sort_idx = np.argsort(np.argmax(temporal_response_per_t_neuron[temporal_e_nasal_null_idx], axis=1))
+    temporal_e_nasal_null_idx = temporal_e_nasal_null_idx[temporal_e_nasal_null_sort_idx]
+
     temporal_i_nasal_null_idx = np.where(
         (temporal_response_per_neuron <= inhibited_threshold) &
         (np.abs(nasal_response_per_neuron) < excited_threshold)
     )[0]
+
+    # sort the temporal i nasal null idx, by location of maximum response
+    temporal_i_nasal_null_sort_idx = np.argsort(
+        np.argmin(temporal_response_per_t_neuron[temporal_i_nasal_null_idx], axis=1))
+    temporal_i_nasal_null_idx = temporal_i_nasal_null_idx[temporal_i_nasal_null_sort_idx]
 
     temporal_null_nasal_e_idx = np.where(
         (temporal_response_per_neuron < excited_threshold) &
         (nasal_response_per_neuron >= excited_threshold)
     )[0]
 
+    # sort the temporal null nasal e idx
+    temporal_null_nasal_e_sort_idx = np.argsort(
+        np.argmax(nasal_response_per_t_neuron[temporal_null_nasal_e_idx], axis=1))
+    temporal_null_nasal_e_idx = temporal_null_nasal_e_idx[temporal_null_nasal_e_sort_idx]
+
+    # TEMPORAL E NASAL E
     temporal_e_nasal_e_idx = np.where(
         (temporal_response_per_neuron > excited_threshold) &
         (nasal_response_per_neuron > excited_threshold)
     )[0]
+
+    temporal_e_nasal_e_idx_sort_idx = np.argsort(
+        np.argmax(nasal_response_per_t_neuron[temporal_e_nasal_e_idx], axis=1))
+    temporal_e_nasal_e_idx = temporal_e_nasal_e_idx[temporal_e_nasal_e_idx_sort_idx]
+
+    # TEMPORAL E NASAL I
 
     temporal_e_nasal_i_idx = np.where(
         (temporal_response_per_neuron > excited_threshold) &
         (nasal_response_per_neuron <= inhibited_threshold)
     )[0]
 
+    temporal_e_nasal_i_sort_idx = np.argsort(
+        np.argmin(nasal_response_per_t_neuron[temporal_e_nasal_i_idx], axis=1))
+    temporal_e_nasal_i_idx = temporal_e_nasal_i_idx[temporal_e_nasal_i_sort_idx]
+
+    # TEMPORAL I NASAL I
+
     temporal_i_nasal_i_idx = np.where(
         (temporal_response_per_neuron <= inhibited_threshold) &
         (nasal_response_per_neuron <= inhibited_threshold)
     )[0]
 
+    temporal_i_nasal_i_sort_idx = np.argsort(
+        np.argmin(nasal_response_per_t_neuron[temporal_i_nasal_i_idx], axis=1))
+    temporal_i_nasal_i_idx = temporal_i_nasal_i_idx[temporal_i_nasal_i_sort_idx]
+
+    # TEMPORAL NULL NASAL I
     temporal_null_nasal_i_idx = np.where(
         (np.abs(temporal_response_per_neuron) < excited_threshold) &
         (nasal_response_per_neuron <= inhibited_threshold)
+    )[0]
+
+    temporal_null_nasal_i_idx_sort_idx = np.argsort(
+        np.argmin(nasal_response_per_t_neuron[temporal_null_nasal_i_idx], axis=1))
+    temporal_null_nasal_i_idx = temporal_null_nasal_i_idx[temporal_null_nasal_i_idx_sort_idx]
+
+    temporal_null_nasal_null_idx = np.where(
+        (np.abs(temporal_response_per_neuron) < excited_threshold) &
+        (np.abs(nasal_response_per_neuron) < excited_threshold)
     )[0]
 
     sort_idx = np.concatenate([
@@ -2504,6 +2624,7 @@ def get_Anya_raster_sort_idx(temporal_response_per_neuron, nasal_response_per_ne
         temporal_e_nasal_e_idx,
         temporal_null_nasal_e_idx,
         temporal_null_nasal_i_idx,
+        temporal_null_nasal_null_idx,
     ])
 
     return sort_idx
@@ -2589,17 +2710,49 @@ def plot_von_mises_fitted_loc(von_mises_fitted_loc, subset_indices=None, dot_siz
 
     return fig, axs
 
+def plot_running_weight_dist(both_exp_running_weights, gray_exp_running_weights, grating_exp_running_weights,
+                             num_bins=100, fig=None, axs=None):
+
+    if (fig is None) and (axs is None):
+        fig, axs = plt.subplots(1, 3, sharex=True)
+        fig.set_size_inches(9, 3)
+
+    hist_color = 'black'
+
+    axs[0].hist(both_exp_running_weights, bins=num_bins, lw=0, color=hist_color)
+    axs[0].set_title('Both experiments', size=11)
+
+    axs[1].hist(gray_exp_running_weights, bins=num_bins, lw=0, color=hist_color)
+    axs[1].set_title('Gray experiments', size=11)
+
+    axs[2].hist(grating_exp_running_weights, bins=num_bins, lw=0, color=hist_color)
+    axs[2].set_title('Grating experiments', size=11)
+
+    axs[0].set_ylabel('Number of cells', size=11)
+    fig.text(0.5, -0.04, 'Running weight', size=11, ha='center')
+
+    axs[0].set_xlim([-1, 1])
+
+    return fig, axs
+
+
 def main():
 
     available_processes = ['load_data', 'plot_data',
                            'plot_running_data',
-                           'fit_regression_model', 'plot_regression_model_explained_var',
+                           'fit_regression_model',
+                           'plot_example_neuron_fit',
+                           'plot_regression_model_explained_var',
+                           'plot_regression_model_full_vs_aligned_explained_var',
                            'plot_regression_model_example_neurons', 'compare_iterative_vs_normal_fit',
                            'plot_pupil_data', 'plot_original_vs_aligned_explained_var',
                            'plot_grating_vs_gray_screen_single_cell_fit_performance',
-                           'plot_grating_vs_gray_screen_example_neurons', 'compare_saccade_kernels', 'compare_saccade_triggered_average',
-                           'plot_sig_vs_nosig_neuron_explained_var', 'plot_saccade_neuron_psth_and_regression',
-                           'plot_sig_model_comparison_neurons', 'plot_num_saccade_per_ori',
+                           'plot_grating_vs_gray_screen_example_neurons', 'compare_saccade_kernels',
+                           'compare_saccade_triggered_average',
+                           'plot_sig_vs_nosig_neuron_explained_var',
+                           'plot_saccade_neuron_psth_and_regression',
+                           'plot_sig_model_comparison_neurons',
+                           'plot_num_saccade_per_ori',
                            'plot_vis_and_saccade_neuron_individual_trials',
                            'fit_saccade_ori_tuning_curves',
                            'plot_saccade_ori_tuning_curves', 'plot_saccade_ori_preferred_ori',
@@ -2607,10 +2760,12 @@ def main():
                            'plot_vis_neurons_vs_vis_saccade_neuron_preferred_ori',
                            'plot_saccade_kernel_and_sign_distribution',
                            'plot_kernel_fit_raster',
-                           'plot_kernel_scatter']
+                           'plot_kernel_scatter',
+                           'plot_running_weights',
+                           'plot_kernel_train_test']
 
 
-    processes_to_run = ['fit_regression_model']
+    processes_to_run = ['plot_kernel_train_test']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
@@ -2631,7 +2786,7 @@ def main():
         'fit_regression_model': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis/New',
             running_data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/sc_neurons_2p',
-            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/diff-saccade-kernels',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/2-fold',
             file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
                                 '_saccadeIntervalsVis', '_pupilSizeVis',
@@ -2652,11 +2807,19 @@ def main():
                                # 'vis_and_running': ['bias', 'vis_on', 'vis_dir', 'running'],
                                # 'vis_ori_and_running': ['bias', 'vis_ori', 'running'],
                                # 'vis_and_saccade_and_pupil': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'pupil_size'],
-                               'vis_and_saccade_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'running'],
-                               'vis_and_saccade_nt_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_nasal', 'saccade_temporal', 'running'],
+                               # 'vis_on_and_saccade_and_running':  ['bias', 'vis_on', 'saccade_on', 'saccade_dir', 'running'],
+                               # 'vis_and_saccade_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'running'],
+                               # 'vis_and_saccade_on_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'running'],
+                               # 'vis_and_saccade_nt_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_nasal', 'saccade_temporal', 'running'],
+                               'running': ['bias', 'running'],
+                               # 'saccade': ['bias', 'saccade_on', 'saccade_dir'],
+                               'saccade_and_running': ['bias', 'saccade_on', 'saccade_dir', 'running'],
+                               'saccade_on_and_running': ['bias', 'saccade_dir', 'running'],
+                               # 'saccade_shuffled_and_running': ['bias', 'saccade_on_shuffled', 'saccade_dir_shuffled', 'running'],
+                               # 'saccade_nt': ['bias', 'saccade_nasal', 'saccade_temporal'],
                                # 'vis_ori_and_saccade_and_running': ['bias', 'vis_ori', 'saccade_on', 'saccade_dir', 'running'],
                                # 'vis_and_saccade_shuffled_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on_shuffled', 'saccade_dir_shuffled',
-                               #                                          'running'],
+                               #                                           'running'],
                                # 'vis_ori_and_saccade_shuffled_and_running': ['bias', 'vis_ori', 'saccade_on_shuffled', 'saccade_dir_shuffled',
                                #                                          'running'],
                                # 'vis_and_saccade_and_running_and_pupil': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir',
@@ -2674,14 +2837,19 @@ def main():
                                   'vis_on_saccade_on': [-1.0, 3.0], 'vis_ori_iterative': [0, 3.0],
                                   'pupil_size': None, 'running': None},
             performance_metrics=['explained_variance', 'r2'],
-            aligned_explained_var_time_windows={'vis': [0, 3], 'saccade': [0, 0.5]},
-            exp_type='both',  # 'grating', 'gray', 'both'
+            aligned_explained_var_time_windows={'vis': [0, 3],  # originally [0, 3]
+                                                'saccade': [-0.5, 0.5]},  # originally [0, 0.5]
+            exp_type='gray',  # 'grating', 'gray', 'both'
             exclude_saccade_on_vis_exp=False,
             pupil_preprocessing_steps=['zscore'],
             train_test_split_method='n_fold_cv',   # 'half' or 'n_fold_cv'
+            n_cv_folds=2,   # defualt to 10
             neural_preprocessing_steps=['z_score_separately', 'zscore_w_baseline'],  # 'zscore' is optional, 'z_score_separately', 'zscore_w_baseline'
             # for 'both' experiment option, use: ['z_score_separately', 'zscore_w_baseline']
-            # for 'gray' / 'vis' experiment option, use : 'zscore_w_baseline'
+            # for 'gray' / 'grating' experiment option, use : 'zscore_w_baseline'
+        ),
+        'plot_example_neuron_fit': dict(
+
         ),
         'plot_regression_model_explained_var': dict(
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
@@ -2704,8 +2872,14 @@ def main():
                 # ['vis_ori_and_pupil', 'saccade_and_pupil']
                 ['vis_and_running', 'vis_and_saccade_and_running'],
                 ['vis_and_saccade_shuffled_and_running', 'vis_and_saccade_and_running'],
+              #   ['bias_only', 'saccade'],
+                # ['saccade', 'saccade_and_running'],
+                # ['running', 'saccade_and_running'],
+                # ['saccade_shuffled_and_running', 'saccade_and_running'],
                #  ['vis_and_saccade', 'vis_and_saccade_and_pupil'],
                #  ['vis_and_saccade_and_running', 'vis_and_saccade_and_running_and_pupil']
+               #  ['vis_and_saccade_and_running', 'vis_and_saccade_nt_and_running']
+               #  ['saccade', 'saccade_nt']
             ],  # options for metrics are : 'vis_aligned_var_explained', 'saccade_aligned_var_explained', '
             # metrics_to_compare=np.array([
             #       ['vis_aligned_r2', 'vis_aligned_r2'],
@@ -2724,16 +2898,67 @@ def main():
             metrics_to_compare=np.array([
                   # ['vis_aligned_var_explained', 'vis_aligned_var_explained'],
                   # ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
-                  ['explained_var_per_X_set', 'explained_var_per_X_set'],
-                  ['explained_var_per_X_set', 'explained_var_per_X_set'],
+                # ['explained_var_per_X_set', 'explained_var_per_X_set'],
+               ['explained_var_per_X_set', 'explained_var_per_X_set'],
+                ['explained_var_per_X_set', 'explained_var_per_X_set'],
+                ['explained_var_per_X_set', 'explained_var_per_X_set'],
+               #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
+               #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
+               #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
                   # ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
                   # ['vis_aligned_var_explained', 'saccade_aligned_var_explained'],
-                 #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
+                 # ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
                  #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
                  #  ['saccade_aligned_var_explained', 'saccade_aligned_var_explained'],
                   # ['explained_var_per_X_set', 'explained_var_per_X_set']
             ]),
-            custom_fig_addinfo='saccade_shuffled_var_per_X_set_original',  # 'original', or 'aligned', 'aligned_r2', 'original_r2', 'aligned_separate_zscore_using_iti'
+            custom_fig_addinfo='both_full_Ev',  # 'original', or 'aligned', 'aligned_r2', 'original_r2', 'aligned_separate_zscore_using_iti'
+            exp_type='both',  # 'grating', 'gray', 'both'
+            clip_at_zero=True,
+            include_exp_name_in_title=True,
+            plot_delta_ev_summary=True,
+        ),
+        'plot_regression_model_full_vs_aligned_explained_var': dict(
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/both-include-vis-saccade-separate-zscore',
+            X_sets_to_compare=[
+                # ['vis_on_only', 'vis_ori'],
+                # ['saccade_on_only', 'saccade'],
+                # ['vis_on_only', 'saccade_on_only'],
+                # ['vis_ori', 'saccade_on_only'],
+                # ['vis_ori', 'saccade'],
+                # ['vis_on_only', 'vis'],
+                # ['saccade_on_only', 'saccade'],
+                # ['vis_on_only', 'saccade_on_only'],
+                # ['vis', 'saccade'],
+                # ['vis_on_and_saccade_on', 'vis_on_and_saccade_on_and_interaction']
+                # ['saccade_and_pupil', 'saccade'],
+                # ['vis_ori_and_pupil', 'vis_ori'],
+                #  ['vis_ori', 'saccade'],
+                # ['vis_ori_and_pupil', 'saccade_and_pupil']
+                ['vis_and_running', 'vis_and_saccade_and_running'],
+                ['vis_and_saccade_shuffled_and_running', 'vis_and_saccade_and_running'],
+                #  ['vis_and_saccade', 'vis_and_saccade_and_pupil'],
+                #  ['vis_and_saccade_and_running', 'vis_and_saccade_and_running_and_pupil']
+                #  ['vis_and_saccade_and_running', 'vis_and_saccade_nt_and_running']
+                #  ['saccade', 'saccade_nt']
+            ],  # options for metrics are : 'vis_aligned_var_explained', 'saccade_aligned_var_explained', '
+            # metrics_to_compare=np.array([
+            #       ['vis_aligned_r2', 'vis_aligned_r2'],
+            #       ['saccade_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
+            #       ['vis_aligned_r2', 'saccade_aligned_r2'],
+            # ]),
+            # metrics_to_compare=np.array([
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #        ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            #       ['explained_var_per_X_set', 'explained_var_per_X_set'],
+            # ]),
+            custom_fig_addinfo='both_exp_saccade_shuffled_vs_not_shuffled',
+            # 'original', or 'aligned', 'aligned_r2', 'original_r2', 'aligned_separate_zscore_using_iti'
             exp_type='both',  # 'grating', 'gray', 'both'
             clip_at_zero=True,
             include_exp_name_in_title=True,
@@ -2838,9 +3063,13 @@ def main():
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_kernel_comparison-short-time-window',
             plot_variance_explained_comparison=False,
-            gray_exp_model='saccade',
-            grating_exp_model='vis_and_saccade',
+            gray_exp_model='saccade_and_running',
+            gray_exp_null_model='running',
+            grating_exp_model='vis_and_saccade_and_running',
+            grating_exp_null_model='vis_and_running',
+            sig_experiment='both',  # 'gray', 'grating', 'both'
             num_neurons_to_plot=10,
+            metric_to_plot='explained_var_per_X_set',  # saccade_aligned_var_explained
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
             file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
@@ -3004,8 +3233,11 @@ def main():
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/saccade_neurons/weights/',
             plot_variance_explained_comparison=False,
-            gray_exp_model='saccade',
+            gray_exp_model='saccade_and_running',
+            gray_exp_null_model='running',
+            subset_only_better_than_null=True,
             grating_exp_model='vis_and_saccade',
+            both_exp_model=None,
             file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
                                 '_gratingIntervals', '_gratingIds', '_gratingIdDirections',
                                 '_saccadeIntervalsVis', '_pupilSizeVis',
@@ -3035,13 +3267,45 @@ def main():
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
             regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
             fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/kernel_scatter/',
-            neuron_subset_condition='sig_saccade_neurons',
-            model_X_set_to_plot='vis_and_saccade_and_running',
+            neuron_subset_condition='better_than_null',  # 'sig_saccade_neurons' or 'better_than_null', 'both_vis_dir_and_saccade_dir_selective'
+            model_X_set_to_plot='saccade_and_running',  # vis_and_saccade_and_running, saccade_and_running
+            null_X_set='running',   # 'running', or 'vis_and_running'
             explained_var_threshold=0,
-            exp_type='both',
-            x_axis_kernel='saccade_dir_nasal',
-            y_axis_kernel='saccade_dir_temporal',
+            exp_type='gray',  # 'gray', 'grating', 'both'
+            x_axis_kernel='saccade_dir_nasal',  # 'vis_dir_nasal' , saccade_dir_nasal
+            y_axis_kernel='saccade_dir_temporal',  # 'vis_dir_temporal', 'saccade_dir_temporal'
+            kernel_metric='peak',   # 'mean' or 'peak'
+            do_stats=True,
+            same_x_y_range=False,
+            plot_indv_lobf=False,  # line of best fit
         ),
+        'plot_kernel_train_test': dict(
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/2-fold',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/kernel_scatter/',
+            neuron_subset_condition='better_than_null',
+            # 'sig_saccade_neurons' or 'better_than_null', 'both_vis_dir_and_saccade_dir_selective'
+            model_X_set_to_plot='vis_and_saccade_and_running',  # vis_and_saccade_and_running, saccade_and_running
+            null_X_set='vis_and_running',  # 'running', or 'vis_and_running'
+            explained_var_threshold=0,
+            exp_type='grating',  # 'gray', 'grating', 'both'
+            kernels_to_plot=['saccade_nasal', 'saccade_temporal'],
+            kernel_metric='mean',  # 'mean' or 'peak'
+            do_stats=True,
+            same_x_y_range=False,
+            plot_indv_lobf=False,  # line of best fit
+        ),
+        'plot_running_weights': dict(
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/running_weights/',
+            both_exp_model='vis_and_saccade_and_running',
+            both_exp_null_model='vis_and_saccade',
+            grating_exp_model='vis_and_saccade_and_running',
+            grating_exp_null_model='vis_and_saccade',
+            gray_exp_model='saccade_and_running',
+            gray_exp_null_model='saccade',
+        )
     }
 
     print('Selected the following processes to run %s' % processes_to_run)
@@ -3106,6 +3370,7 @@ def main():
             aligned_explained_var_time_windows = process_params[process]['aligned_explained_var_time_windows']
             X_sets_to_compare = process_params[process]['X_sets_to_compare']
             performance_metrics = process_params[process]['performance_metrics']
+            n_cv_folds = process_params[process]['n_cv_folds']
 
             if not os.path.isdir(regression_results_folder):
                 os.makedirs(regression_results_folder)
@@ -3186,8 +3451,8 @@ def main():
                     feature_indices_per_X_set[X_set_name] = feature_indices
 
                     regression_result = fit_regression_model(X, Y, performance_metrics=performance_metrics,
-                                                             train_test_split_method=process_params[process]['train_test_split_method'])
-
+                                                             train_test_split_method=process_params[process]['train_test_split_method'],
+                                                             n_cv_folds=n_cv_folds)
 
                     regression_result = get_aligned_explained_variance(regression_result, exp_data, performance_metrics=performance_metrics,
                                                                        exp_type=process_params[process]['exp_type'],
@@ -3290,9 +3555,12 @@ def main():
             metrics_to_compare = process_params[process]['metrics_to_compare']
             custom_fig_addinfo = process_params[process]['custom_fig_addinfo']
             include_exp_name_in_title = process_params[process]['include_exp_name_in_title']
+            plot_delta_ev_summary = process_params[process]['plot_delta_ev_summary']
 
             fig_folder = process_params[process]['fig_folder']
             text_size = 11
+
+            delta_ev_per_exp = defaultdict(list)
 
             for fpath in regression_result_files:
 
@@ -3303,6 +3571,10 @@ def main():
                 with plt.style.context(splstyle.get_style('nature-reviews')):
                     fig, axs = plt.subplots(1, len(X_sets_to_compare))
                     fig.set_size_inches(len(X_sets_to_compare)*3, 3)
+
+                    if len(X_sets_to_compare) == 1:
+                        axs = [axs]
+
                     for n_comparison in np.arange(0, len(X_sets_to_compare)):
 
                         model_a = X_sets_to_compare[n_comparison][0]
@@ -3313,13 +3585,21 @@ def main():
                         if process_params[process]['metrics_to_compare'] is not None:
                             model_a_metric = metrics_to_compare[n_comparison, 0]
                             model_b_metric = metrics_to_compare[n_comparison, 1]
-
                         else:
                             model_a_metric = 'explained_var_per_X_set'
                             model_b_metric = 'explained_var_per_X_set'
 
                         model_a_explained_var = regression_result[model_a_metric][:, model_a_idx]
                         model_b_explained_var = regression_result[model_b_metric][:, model_b_idx]
+
+                        # TODO: think about excluding some neurons (negative in both?)
+                        subset_idx = np.where(
+                           ~((model_b_explained_var < 0) &
+                             (model_a_explained_var < 0))
+                        )
+
+                        delta_ev = model_b_explained_var - model_a_explained_var
+                        delta_ev_per_exp[n_comparison].append(delta_ev[subset_idx])
 
                         axs[n_comparison].scatter(model_a_explained_var, model_b_explained_var, color='black',
                                                   s=10)
@@ -3357,6 +3637,125 @@ def main():
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbbox_inches='tight')
 
                     plt.close(fig)
+
+
+            if plot_delta_ev_summary:
+                for n_comparison in np.arange(0, len(X_sets_to_compare)):
+                    # version 1 of plots : histogram of all delta ev, then line / triangle to indicate mean
+                    n_comparison_delta_ev_per_exp = delta_ev_per_exp[n_comparison]
+                    all_exp_delta_ev = np.concatenate(n_comparison_delta_ev_per_exp).flatten()
+                    each_exp_mean_delta_ev = [np.mean(x) for x in n_comparison_delta_ev_per_exp]
+
+                    x_plot_min = np.percentile(all_exp_delta_ev, 2.5)
+                    x_plot_max = np.percentile(all_exp_delta_ev, 97.5)
+                    bins = np.linspace(x_plot_min, x_plot_max, 100)
+
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, ax = plt.subplots()
+                        ax.hist(all_exp_delta_ev, lw=0, color='black', bins=bins, zorder=0)
+                        ax_ymin, ax_ymax = ax.set_ylim()
+
+                        for exp_mean_delta_ev in each_exp_mean_delta_ev:
+                            ax.scatter(exp_mean_delta_ev, ax_ymax * 0.9, marker='v', lw=0, zorder=1)
+
+                    model_a = X_sets_to_compare[n_comparison][0]
+                    model_b = X_sets_to_compare[n_comparison][1]
+
+                    ax.set_title('%s - %s' % (model_b, model_a), size=11)
+                    ax.set_xlabel(r'$\Delta$ Explained Variance', size=11)
+                    ax.set_ylabel('Number of units', size=11)
+                    # ax.set_xlim([x_plot_min, x_plot_max])
+                    fig_name = 'all_exp_delta_ev_hist_X_set_comparison_%.f_%s' % (n_comparison, custom_fig_addinfo)
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                    plt.close(fig)
+
+
+                    # Box plot for each experiment
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, ax = plt.subplots()
+                        fig.set_size_inches(6, 5)
+                        ax.boxplot(n_comparison_delta_ev_per_exp, vert=False)
+                        ax.set_title('%s - %s' % (model_b, model_a), size=11)
+                        ax.set_xlabel(r'$\Delta$ Explained Variance', size=11)
+                        ax.set_ylabel('Experiments')
+                        ax.set_yticks([])
+                        ax.spines['left'].set_visible(False)
+
+                        fig_name = 'all_exp_delta_ev_boxplot_X_set_comparison_%.f_%s' % (n_comparison, custom_fig_addinfo)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                        plt.close(fig)
+
+                    
+        if process == 'plot_regression_model_full_vs_aligned_explained_var':
+
+            exp_type = process_params[process]['exp_type']
+            regression_result_files = glob.glob(os.path.join(process_params[process]['regression_results_folder'],
+                                                             '*%s*npz' % exp_type))
+            X_sets_to_compare = process_params[process]['X_sets_to_compare']
+            # metrics_to_compare = process_params[process]['metrics_to_compare']
+            custom_fig_addinfo = process_params[process]['custom_fig_addinfo']
+            include_exp_name_in_title = process_params[process]['include_exp_name_in_title']
+
+            subset_only_both_pos_neurons = True
+
+            fig_folder = process_params[process]['fig_folder']
+            text_size = 11
+
+            for fpath in regression_result_files:
+                regression_result = np.load(fpath)
+
+                X_sets_names = regression_result['X_sets_names']
+                exp_id_parts = os.path.basename(fpath).split('.')[0].split('_')
+                subject = exp_id_parts[0]
+                exp_date = exp_id_parts[1]
+
+                for n_comparison in np.arange(0, len(X_sets_to_compare)):
+                    model_a = X_sets_to_compare[n_comparison][0]
+                    model_b = X_sets_to_compare[n_comparison][1]
+                    model_a_idx = np.where(X_sets_names == model_a)
+                    model_b_idx = np.where(X_sets_names == model_b)
+
+                    model_a_explained_var = regression_result['explained_var_per_X_set'][:, model_a_idx]
+                    model_b_explained_var = regression_result['explained_var_per_X_set'][:, model_b_idx]
+
+                    if subset_only_both_pos_neurons:
+                        subset_idx = np.where(
+                            (model_a_explained_var > 0) &
+                            (model_b_explained_var > 0)
+                        )[0]
+                    else:
+                        subset_idx = np.arange(np.shape(model_a_explained_var)[0])
+
+                    model_a_saccade_aligned_ev = regression_result['saccade_aligned_var_explained'][:, model_a_idx]
+                    model_b_saccade_aligned_ev = regression_result['saccade_aligned_var_explained'][:, model_b_idx]
+
+                    model_b_minus_a_ev = model_b_explained_var[subset_idx] - model_a_explained_var[subset_idx]
+                    model_b_minus_a_saccade_aligned_ev = model_b_saccade_aligned_ev[subset_idx] - model_a_saccade_aligned_ev[subset_idx]
+
+
+                    with plt.style.context(splstyle.get_style('nature-reviews')):
+                        fig, ax = plt.subplots()
+                        fig.set_size_inches(4, 4)
+
+                        ax.scatter(model_b_minus_a_ev, model_b_minus_a_saccade_aligned_ev, color='black', s=10, lw=0)
+                        ax.set_title('%s %s %s' %  (exp_type, subject, exp_date), size=11)
+                        ax.set_xlabel(r'$\Delta$ EV', size=11)
+                        ax.set_ylabel(r'$\Delta$ saccade aligned EV', size=11)
+
+
+
+                    if custom_fig_addinfo is not None:
+                        fig_name = '%s_%s_%s_%s_full_EV_vs_saccade_aligned_EV_diff' % (
+                        exp_type, subject, exp_date, custom_fig_addinfo)
+                    else:
+                        fig_name = '%s_%s_%s_full_EV_vs_saccade_aligned_EV_diff' % (exp_type, subject, exp_date)
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbbox_inches='tight')
+
+                    plt.close(fig)
+            
         if process == 'plot_grating_vs_gray_screen_single_cell_fit_performance':
 
             print('Plotting grating vs gray screen single cell performance')
@@ -3843,9 +4242,13 @@ def main():
 
             plot_variance_explained_comparison = process_params[process]['plot_variance_explained_comparison']
             grating_exp_model = process_params[process]['grating_exp_model']
+            grating_exp_null_model = process_params[process]['grating_exp_null_model']
             gray_exp_model = process_params[process]['gray_exp_model']
-            # metric_to_plot = 'explained_var_per_X_set'
-            metric_to_plot = 'saccade_aligned_var_explained'
+            gray_exp_null_model = process_params[process]['gray_exp_null_model']
+            metric_to_plot = process_params[process]['metric_to_plot']
+            sig_experiment = process_params[process]['sig_experiment']
+
+            # metric_to_plot = 'saccade_aligned_var_explained'
 
             if not os.path.isdir(fig_folder):
                 os.makedirs(fig_folder)
@@ -3959,6 +4362,11 @@ def main():
             data = load_data(data_folder=process_params[process]['data_folder'],
                              file_types_to_load=process_params[process]['file_types_to_load'])
 
+            all_gray_exp_nasal_saccade_kernel_mean = []
+            all_gray_exp_temporal_saccade_kernel_mean = []
+            all_grating_exp_nasal_saccade_kernel_mean = []
+            all_grating_exp_temporal_saccade_kernel_mean = []
+
             # Compare the temporal profile of the saccade kernels
             for exp_id in exp_ids:
 
@@ -3977,15 +4385,69 @@ def main():
                     grating_regression_result['X_sets_names'] == grating_exp_model
                 )[0][0]
 
+                grating_exp_null_model_idx = np.where(
+                    grating_regression_result['X_sets_names'] == grating_exp_null_model
+                )[0][0]
+
                 gray_exp_saccade_dir_model_idx = np.where(
                     gray_regression_result['X_sets_names'] == gray_exp_model
+                )[0][0]
+
+                gray_exp_null_model_idx = np.where(
+                    gray_regression_result['X_sets_names'] == gray_exp_null_model
                 )[0][0]
 
                 grating_exp_model_explained_var = grating_regression_result[metric_to_plot][:,
                                                         grating_exp_saccade_dir_model_idx]
 
+                grating_exp_null_model_explained_var = grating_regression_result[metric_to_plot][:,
+                                                  grating_exp_null_model_idx]
+
                 gray_exp_model_explained_var = gray_regression_result[metric_to_plot][:,
                                                      gray_exp_saccade_dir_model_idx]
+
+                gray_exp_null_model_explained_var = gray_regression_result[metric_to_plot][:,
+                                               gray_exp_null_model_idx]
+
+
+                grating_nasal_saccade_kernel, grating_temporal_saccade_kernel = \
+                    get_saccade_kernel_from_regression_result(grating_regression_result, grating_exp_model)
+
+                grating_sig_saccade_neurons = np.where(
+                    (grating_exp_model_explained_var > grating_exp_null_model_explained_var) &
+                    (grating_exp_model_explained_var > 0)
+                )[0]
+
+                gray_nasal_saccade_kernel, gray_temporal_saccade_kernel = \
+                    get_saccade_kernel_from_regression_result(gray_regression_result, gray_exp_model)
+
+                gray_sig_saccade_neurons = np.where(
+                    (gray_exp_model_explained_var > gray_exp_null_model_explained_var) &
+                    (gray_exp_model_explained_var > 0)
+                )[0]
+
+                if sig_experiment == 'both':
+
+                    subset_idx = np.intersect1d(grating_sig_saccade_neurons,
+                                                gray_sig_saccade_neurons)
+
+                elif sig_experiment == 'grating':
+
+                    subset_idx = grating_sig_saccade_neurons
+
+                elif sig_experiment == 'gray':
+
+                    subset_idx = gray_sig_saccade_neurons
+
+                grating_nasal_saccade_kernel_subset = grating_nasal_saccade_kernel[subset_idx]
+                grating_temporal_saccade_kernel_subset = grating_temporal_saccade_kernel[subset_idx]
+                gray_nasal_saccade_kernel_subset = gray_nasal_saccade_kernel[subset_idx]
+                gray_temporal_saccade_kernel = gray_temporal_saccade_kernel[subset_idx]
+
+                all_gray_exp_nasal_saccade_kernel_mean.append(gray_nasal_saccade_kernel_subset)
+                all_gray_exp_temporal_saccade_kernel_mean.append(gray_temporal_saccade_kernel)
+                all_grating_exp_nasal_saccade_kernel_mean.append(grating_nasal_saccade_kernel_subset)
+                all_grating_exp_temporal_saccade_kernel_mean.append(grating_temporal_saccade_kernel_subset)
 
                 gray_exp_model_saccade_aligned_ev = gray_regression_result['saccade_aligned_var_explained'][:, gray_exp_saccade_dir_model_idx]
 
@@ -4183,6 +4645,33 @@ def main():
                     fig.tight_layout()
                     fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight', transparent=False)
                     plt.close(fig)
+
+
+
+            # Compare grating and gray screen kernel mean across all experiments
+            all_gray_exp_nasal_saccade_kernel_mean = np.concatenate(all_gray_exp_nasal_saccade_kernel_mean)
+            all_grating_exp_nasal_saccade_kernel_mean = np.concatenate(all_grating_exp_nasal_saccade_kernel_mean)
+            all_gray_exp_temporal_saccade_kernel_mean = np.concatenate(all_gray_exp_temporal_saccade_kernel_mean)
+            all_grating_exp_temporal_saccade_kernel_mean = np.concatenate(all_grating_exp_temporal_saccade_kernel_mean)
+
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                fig, axs = plt.subplots(1, 2)
+                fig.set_size_inches(8, 4)
+                axs[0].scatter(all_gray_exp_nasal_saccade_kernel_mean,
+                               all_grating_exp_nasal_saccade_kernel_mean, color='black', lw=0, s=10)
+                axs[0].set_xlabel('Gray exp nasal saccade', size=11)
+                axs[0].set_ylabel('Grating exp nasal saccade', size=11)
+
+                axs[1].scatter(all_gray_exp_temporal_saccade_kernel_mean,
+                               all_grating_exp_temporal_saccade_kernel_mean, color='black', lw=0, s=10)
+                axs[1].set_xlabel('Gray exp temporal saccade', size=11)
+                axs[1].set_ylabel('Grating exp temporal saccade', size=11)
+
+                fig_name = 'all_exp_gray_vs_grating_saccade_kernels'
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+                plt.close(fig)
+
         if process == 'compare_saccade_triggered_average':
 
             print('Comparing saccade triggered average of neurons')
@@ -4653,6 +5142,9 @@ def main():
 
             regression_results_folder = process_params[process]['regression_results_folder']
             fig_folder = process_params[process]['fig_folder']
+            gray_exp_model = process_params[process]['gray_exp_model']
+            gray_exp_null_model = process_params[process]['gray_exp_null_model']
+            subset_only_better_than_null = process_params[process]['subset_only_better_than_null']
 
             data = load_data(data_folder=process_params[process]['data_folder'],
                              file_types_to_load=process_params[process]['file_types_to_load'])
@@ -4663,6 +5155,9 @@ def main():
 
             all_exp_saccade_on_model_ev = []
             all_exp_exp_saccade_dir_model_ev = []
+
+            all_exp_saccade_nasal_mean = []
+            all_exp_saccade_temporal_mean = []
 
             for exp_id, exp_data in data.items():
                 grating_regression_result = np.load(
@@ -4676,7 +5171,7 @@ def main():
                     glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, 'both')))[0],
                     allow_pickle=True)
 
-
+                # Get "significant" neurons from test Anja performed
                 gray_exp_sig_saccade_neurons = exp_data['_sigNeurons'].flatten()
                 gray_exp_sig_saccade_neurons = np.array([int(x) for x in gray_exp_sig_saccade_neurons])
 
@@ -4687,6 +5182,30 @@ def main():
                 gray_exp_saccade_dir_model_idx = np.where(
                     gray_regression_result['X_sets_names'] == 'saccade'
                 )[0][0]
+
+                # Get the mean saccade temporal and nasal kernel for significant sacacade neurons in gray exp
+                if subset_only_better_than_null:
+
+                    gray_exp_saccade_model_idx = np.where(
+                        gray_regression_result['X_sets_names'] == gray_exp_model
+                    )[0][0]
+
+                    gray_exp_null_model_idx = np.where(
+                        gray_regression_result['X_sets_names'] == gray_exp_null_model
+                    )[0][0]
+
+                    gray_exp_explained_var_per_X_set = gray_regression_result['explained_var_per_X_set']
+                    model_a_explained_var = gray_exp_explained_var_per_X_set[:, gray_exp_saccade_model_idx]
+                    model_b_explained_var = gray_exp_explained_var_per_X_set[:, gray_exp_null_model_idx]
+
+                    subset_neuron_idx = np.where(
+                        (model_a_explained_var > model_b_explained_var) &
+                        (model_a_explained_var > 0)
+                    )[0]
+
+                    pdb.set_trace()
+
+
 
                 # TEMP: some code here to compare number of saccade on vs. saccade dir neurons
                 with plt.style.context(splstyle.get_style('nature-reviews')):
@@ -6723,6 +7242,8 @@ def main():
             transform_dir_to_temporal_nasal = process_params[process]['transform_dir_to_temporal_nasal']
             explained_var_threshold = process_params[process]['explained_var_threshold']
             exp_type = process_params[process]['exp_type']
+            excited_threshold = 0.1
+            inhibited_threshold = -0.1
 
             if not os.path.isdir(fig_folder):
                 os.makedirs(fig_folder)
@@ -6805,9 +7326,12 @@ def main():
                     X_set_weights_all_mean_sorted = X_set_weights_all_mean[sort_idx, :]
                 elif sort_method == 'Anya':
 
-                    temporal_response_per_neuron = np.mean(X_set_weights_all_mean[:, feature_name_and_indices['saccade_temporal']], axis=1)
-                    nasal_response_per_neuron = np.mean(X_set_weights_all_mean[:, feature_name_and_indices['saccade_nasal']], axis=1)
-                    sort_idx = get_Anya_raster_sort_idx(temporal_response_per_neuron, nasal_response_per_neuron)
+                    temporal_response_per_t_neuron = X_set_weights_all_mean[:, feature_name_and_indices['saccade_temporal']]
+                    nasal_response_per_t_neuron = X_set_weights_all_mean[:, feature_name_and_indices['saccade_nasal']]
+
+                    sort_idx = get_Anya_raster_sort_idx(temporal_response_per_t_neuron, nasal_response_per_t_neuron,
+                                                        excited_threshold=excited_threshold,
+                                                        inhibited_threshold=inhibited_threshold)
 
                     X_set_weights_all_mean_sorted = X_set_weights_all_mean[sort_idx, :]
 
@@ -6847,11 +7371,14 @@ def main():
                 sort_idx = model.isort
                 all_X_set_weights_all_mean_sorted = all_X_set_weights_all_mean[sort_idx, :]
             elif sort_method == 'Anya':
-                temporal_response_per_neuron = np.mean(
-                    all_X_set_weights_all_mean[:, feature_name_and_indices['saccade_temporal']], axis=1)
-                nasal_response_per_neuron = np.mean(
-                    all_X_set_weights_all_mean[:, feature_name_and_indices['saccade_nasal']], axis=1)
-                sort_idx = get_Anya_raster_sort_idx(temporal_response_per_neuron, nasal_response_per_neuron)
+
+                temporal_response_per_t_neuron = all_X_set_weights_all_mean[:, feature_name_and_indices['saccade_temporal']]
+                nasal_response_per_t_neuron = all_X_set_weights_all_mean[:, feature_name_and_indices['saccade_nasal']]
+
+                sort_idx = get_Anya_raster_sort_idx(temporal_response_per_t_neuron, nasal_response_per_t_neuron,
+                                                    excited_threshold=excited_threshold,
+                                                    inhibited_threshold=inhibited_threshold)
+
                 all_X_set_weights_all_mean_sorted = all_X_set_weights_all_mean[sort_idx, :]
 
             elif sort_method == 'none':
@@ -6886,24 +7413,366 @@ def main():
             """
 
             model_X_set_to_plot = process_params[process]['model_X_set_to_plot']
+            null_X_set = process_params[process]['null_X_set']
+
             fig_folder = process_params[process]['fig_folder']
             neuron_subset_condition = process_params[process]['neuron_subset_condition']
             explained_var_threshold = process_params[process]['explained_var_threshold']
             exp_type = process_params[process]['exp_type']
             x_axis_kernel = process_params[process]['x_axis_kernel']
             y_axis_kernel = process_params[process]['y_axis_kernel']
+            same_x_y_range = process_params[process]['same_x_y_range']
+            plot_indv_lobf = process_params[process]['plot_indv_lobf']
+            kernel_metric = process_params[process]['kernel_metric']
+
 
             if not os.path.isdir(fig_folder):
                 os.makedirs(fig_folder)
 
             regression_results_folder = process_params[process]['regression_results_folder']
             regression_result_files = glob.glob(os.path.join(regression_results_folder,
-                                                             '*%s*npz' % 'grating'))
+                                                             '*%s*npz' % exp_type))
             exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
                        regression_result_files]
 
             all_exp_x_vals = []
             all_exp_y_vals = []
+            all_subject = []
+            all_exp = []
+
+            exp_intercepts = []
+            exp_slopes = []
+
+
+            for exp_id in exp_ids:
+
+                regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+
+                X_sets_names = regression_result['X_sets_names']
+                explained_var_per_X_set = regression_result['explained_var_per_X_set']
+
+
+                # Subset neurons based on some condition
+
+                if neuron_subset_condition == 'sig_saccade_neurons':
+                    # Get neurons with significant saccade kernel
+                    model_a = 'vis_and_saccade_shuffled_and_running'
+                    model_b = 'vis_and_saccade_and_running'
+
+                    model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                    model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    b_minus_a = model_b_explained_var - model_a_explained_var
+
+                    subset_idx = np.where(
+                        (model_a_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > model_a_explained_var)
+                    )[0]
+
+                    vis_only_neurons_subset_idx = np.where(
+                        (model_a_explained_var > 0) &
+                        (model_b_explained_var <= model_a_explained_var)
+                    )[0]
+
+                    subset_idx = np.where(
+                        (model_a_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > model_a_explained_var)
+                    )[0]
+
+                elif neuron_subset_condition == 'better_than_null':
+
+                    model_a = null_X_set
+                    model_b = model_X_set_to_plot
+
+                    model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                    model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    subset_idx = np.where(
+                        (model_b_explained_var > model_a_explained_var) &
+                        (model_b_explained_var > explained_var_threshold)
+                    )[0]
+                
+                elif neuron_subset_condition == 'both_vis_dir_and_saccade_dir_selective':
+
+                    # Get sig saccade dir neurons
+                    model_a_idx = np.where(X_sets_names == 'vis_and_saccade_and_running')[0][0]
+                    model_b_idx = np.where(X_sets_names == 'vis_and_saccade_on_and_running')[0][0]
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    saccade_dir_sig_idx = np.where(
+                        (model_a_explained_var > model_b_explained_var) &
+                        (model_a_explained_var > explained_var_threshold)
+                    )[0]
+
+                    # Get sig vis dir neurons
+                    model_a_idx = np.where(X_sets_names == 'vis_and_saccade_and_running')[0][0]
+                    model_b_idx = np.where(X_sets_names == 'vis_on_and_saccade_and_running')[0][0]
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    vis_dir_sig_idx = np.where(
+                        (model_a_explained_var > model_b_explained_var) &
+                        (model_a_explained_var > explained_var_threshold)
+                    )[0]
+
+                    subset_idx = np.intersect1d(saccade_dir_sig_idx, vis_dir_sig_idx)
+
+                else:
+                    subset_idx = np.arange(0, np.shape(explained_var_per_X_set)[0])
+
+                # Get the kernels
+                model_weights_per_X_set = regression_result['model_weights_per_X_set'].item()
+                X_set_weights = model_weights_per_X_set[model_X_set_to_plot]  # numCV x numNeuron x numFeatures
+                feature_name_and_indices = regression_result['feature_indices_per_X_set'].item()[model_X_set_to_plot]
+                regression_kernel_windows = regression_result['regression_kernel_windows']
+                saccade_on_kernel_idx = np.where(regression_result['regression_kernel_names'] == 'saccade_on')[0][0]
+                saccade_on_window = regression_kernel_windows[saccade_on_kernel_idx]
+
+
+                saccade_onset_kernel_indices = feature_name_and_indices['saccade_on']
+                saccade_dir_kernel_indices = feature_name_and_indices['saccade_dir']
+
+                saccade_on_kernels = np.mean(X_set_weights[:, subset_idx, :][:, :, saccade_onset_kernel_indices], axis=0)
+                saccade_dir_kernels = np.mean(X_set_weights[:, subset_idx, :][:, :, saccade_dir_kernel_indices], axis=0)
+
+                saccade_on_peri_event_window = np.linspace(saccade_on_window[0], saccade_on_window[1],
+                                                           len(saccade_onset_kernel_indices))
+                post_saccade_idx = np.where(saccade_on_peri_event_window >= 0)[0]
+
+                # Visual kernels
+                if exp_type in ['grating', 'both']:
+                    vis_onset_kernel_indices = feature_name_and_indices['vis_on']
+                    vis_dir_kernel_indices = feature_name_and_indices['vis_dir']
+
+                    vis_on_kernels = np.mean(X_set_weights[:, subset_idx, :][:, :, vis_onset_kernel_indices], axis=0)
+                    vis_dir_kernels = np.mean(X_set_weights[:, subset_idx, :][:, :, vis_dir_kernel_indices], axis=0)
+
+                    vis_on_kernel_idx = np.where(regression_result['regression_kernel_names'] == 'vis_on')[0][0]
+                    vis_on_window = regression_kernel_windows[vis_on_kernel_idx]
+                    vis_on_peri_event_window = np.linspace(vis_on_window[0], vis_on_window[1],
+                                                           len(vis_onset_kernel_indices))
+                    post_vis_on_idx = np.where(vis_on_peri_event_window >= 0)[0]
+
+
+                if x_axis_kernel == 'saccade_dir_nasal':
+
+                    # get only post-saccade time window
+                    saccade_nasal_kernels = saccade_on_kernels - saccade_dir_kernels
+                    if kernel_metric == 'mean':
+                        saccade_nasal_kernels_post_saccade_mean = np.mean(saccade_nasal_kernels[:, post_saccade_idx], axis=1)
+                        exp_x_vals = saccade_nasal_kernels_post_saccade_mean
+                    elif kernel_metric == 'peak':
+                        # include pre-saccade time window (?)
+                        saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels), axis=1)
+                        # saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels[:, post_saccade_idx]), axis=1)
+                        exp_x_vals = []
+                        for n_neuron in np.arange(np.shape(saccade_nasal_kernels)[0]):
+                            exp_x_vals.append(saccade_nasal_kernels[n_neuron, saccade_nasal_kernels_peak_loc[n_neuron]])
+
+                elif x_axis_kernel == 'vis_dir_nasal':
+
+                    vis_nasal_kernels = vis_on_kernels - vis_dir_kernels
+                    exp_x_vals = np.mean(vis_nasal_kernels[:, post_vis_on_idx], axis=1)
+
+                elif x_axis_kernel == 'vis_dir_diff':
+
+                    vis_nasal_kernels = vis_on_kernels - vis_dir_kernels
+                    vis_temporal_kernels = vis_on_kernels + vis_dir_kernels
+                    # temporal - nasal = (vis on + vis_dir) - (vis_on - vis_dir) = 2 * vis_dir
+                    exp_x_vals = 2 * np.mean(vis_dir_kernels[:, post_vis_on_idx], axis=1)  # take the mean across time
+
+                if y_axis_kernel == 'saccade_dir_temporal':
+                    saccade_temporal_kernels = saccade_on_kernels + saccade_dir_kernels
+                    # get only post-saccade time window
+                    if kernel_metric == 'mean':
+                        saccade_temporal_kernels_post_saccade_mean = np.mean(saccade_temporal_kernels[:, post_saccade_idx],
+                                                                          axis=1)
+                        exp_y_vals = saccade_temporal_kernels_post_saccade_mean
+                    elif kernel_metric == 'peak':
+                        # include pre-saccade time window (?)
+                        saccade_temporal_kernels_peak_loc = np.argmax(np.abs(saccade_temporal_kernels), axis=1)
+                        # saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels[:, post_saccade_idx]), axis=1)
+                        exp_y_vals = []
+                        for n_neuron in np.arange(np.shape(saccade_temporal_kernels)[0]):
+                            exp_y_vals.append(saccade_temporal_kernels[n_neuron, saccade_temporal_kernels_peak_loc[n_neuron]])
+
+
+                elif y_axis_kernel == 'vis_dir_temporal':
+
+                    vis_temporal_kernels = vis_on_kernels + vis_dir_kernels
+                    exp_y_vals = np.mean(vis_temporal_kernels[:, post_vis_on_idx], axis=1)
+
+                elif y_axis_kernel == 'saccade_dir_diff':
+
+                    exp_y_vals = 2 * np.mean(saccade_dir_kernels, axis=1)  # take the mean across time
+
+                # Make plot for individual experiment
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                    fig, ax = plt.subplots()
+                    fig.set_size_inches(4, 4)
+
+                    ax.scatter(exp_x_vals, exp_y_vals, s=9, color='black')
+
+                    ax.set_xlabel(x_axis_kernel, size=11)
+                    ax.set_ylabel(y_axis_kernel, size=11)
+                    ax.set_title(exp_id, size=11)
+                    fig_name = '%s_%s_%s_vs_%s_kernel_model_%s' % (exp_type, exp_id, x_axis_kernel, y_axis_kernel, model_X_set_to_plot)
+
+                    if neuron_subset_condition is not None:
+                        fig_name += '_%s' % neuron_subset_condition
+                    else:
+                        fig_name += '_all_neurons'
+
+                    if neuron_subset_condition == 'better_than_null':
+                        fig_name += '_null_X_set_%s' % null_X_set
+
+                    fig_name += '_%s' % kernel_metric
+
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                plt.close(fig)
+
+                # accumulate neurons across all experiments
+                all_exp_x_vals.extend(exp_x_vals)
+                all_exp_y_vals.extend(exp_y_vals)
+                subject = exp_id.split('_')[0]
+                exp = exp_id.split('_')[1]
+                all_subject.extend(np.repeat(subject, len(exp_x_vals)))
+                all_exp.extend(np.repeat(exp, len(exp_x_vals)))
+
+                if plot_indv_lobf:
+                    # fit line of best fit
+                    lobf_result = sstats.linregress(x=exp_x_vals, y=exp_y_vals)
+                    exp_intercepts.append(lobf_result.intercept)
+                    exp_slopes.append(lobf_result.slope)
+
+
+            # Make plot for all experiments
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                fig, ax = plt.subplots()
+                fig.set_size_inches(4, 4)
+
+                print('Number of neurons plotted: %.f' % len(all_exp_x_vals))
+                ax.scatter(all_exp_x_vals, all_exp_y_vals, s=9, color='black')
+
+                if same_x_y_range:
+                    both_x_y_vals = np.concatenate([all_exp_x_vals, all_exp_y_vals])
+                    both_min = np.min(both_x_y_vals)
+                    both_max = np.max(both_x_y_vals)
+                    ax.set_xlim([both_min, both_max])
+                    ax.set_ylim([both_min, both_max])
+
+                if plot_indv_lobf:
+                    for slope, intercept in zip(exp_slopes, exp_intercepts):
+
+                        if same_x_y_range:
+                            x_vals = np.linspace(both_min, both_max, 100)
+                        else:
+                            min_x = np.min(all_exp_x_vals)
+                            max_x = np.max(all_exp_x_vals)
+                            x_vals = np.linspace(min_x, max_x, 100)
+
+                        ax.plot(x_vals, intercept + x_vals * slope, color='gray', lw=1)
+
+                if process_params[process]['do_stats']:
+
+                    # Pearson correlation
+                    pearson_r, pearson_p_val = sstats.pearsonr(all_exp_x_vals, all_exp_y_vals)
+                    print('Pearson r : %.3f' % pearson_r)
+                    print('Pearson p val: %.5f' % pearson_p_val)
+
+                    # Linear mixed effects models
+                    kernel_weights_df = pd.DataFrame.from_dict({
+                        'xval': all_exp_x_vals,
+                        'yval': all_exp_y_vals,
+                        'subject': all_subject,
+                        'exp': all_exp,
+                    })
+
+                    x_y_random_intercept_md = Lmer("yval ~ xval + (1 | subject)",
+                                                       data=kernel_weights_df)
+                    x_y_random_intercept_md_fitted = x_y_random_intercept_md.fit()
+                    x_p_val = sstats.t.sf(abs(x_y_random_intercept_md_fitted['T-stat']['xval']),
+                                                x_y_random_intercept_md_fitted['DF']['xval'])
+                    print('Linear mixed effects model p val %.5f' % x_p_val)
+
+                    print('Random intercept + slope model')
+                    x_y_random_intercept_and_slope_md = Lmer("yval ~ xval + (1 + xval | subject)",
+                                                   data=kernel_weights_df)
+                    x_y_random_intercept_and_slope_md_fitted = x_y_random_intercept_and_slope_md.fit()
+                    x_rand_int_slope_p_val = sstats.t.sf(abs(x_y_random_intercept_and_slope_md_fitted['T-stat']['xval']),
+                                          x_y_random_intercept_and_slope_md_fitted['DF']['xval'])
+                    print('Linear mixed effects model p val %.5f' % x_rand_int_slope_p_val)
+
+                ax.set_xlabel(x_axis_kernel, size=11)
+                ax.set_ylabel(y_axis_kernel, size=11)
+
+                if process_params[process]['do_stats']:
+                    title_txt = 'All exps, pearson r: %.4f, pearson p-val: %.4f \n LME p val: %.4f' % (pearson_r, pearson_p_val, x_p_val)
+                else:
+                    title_txt = 'All exps'
+
+                ax.set_title(title_txt, size=11)
+                fig_name = '%s_all_exp_%s_vs_%s_kernel_model_%s' % (exp_type, x_axis_kernel, y_axis_kernel, model_X_set_to_plot)
+
+                if neuron_subset_condition is not None:
+                    fig_name += '_%s' % neuron_subset_condition
+                else:
+                    fig_name += '_all_neurons'
+
+                if neuron_subset_condition == 'better_than_null':
+                    fig_name += '_null_X_set_%s' % null_X_set
+
+                fig_path = os.path.join(fig_folder, fig_name)
+                fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+                print('Saved figure to %s' % fig_path)
+
+
+            plt.close(fig)
+        if process == 'plot_kernel_train_test':
+
+            model_X_set_to_plot = process_params[process]['model_X_set_to_plot']
+            null_X_set = process_params[process]['null_X_set']
+            kernels_to_plot = process_params[process]['kernels_to_plot']
+            fig_folder = process_params[process]['fig_folder']
+            neuron_subset_condition = process_params[process]['neuron_subset_condition']
+            explained_var_threshold = process_params[process]['explained_var_threshold']
+            exp_type = process_params[process]['exp_type']
+            same_x_y_range = process_params[process]['same_x_y_range']
+            plot_indv_lobf = process_params[process]['plot_indv_lobf']
+            kernel_metric = process_params[process]['kernel_metric']
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
+            regression_results_folder = process_params[process]['regression_results_folder']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % exp_type))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            all_exp_kernel_vals_per_cv = defaultdict(list)
+            all_subject = []
+            all_exp = []
+
+            exp_intercepts = []
+            exp_slopes = []
+
 
             for exp_id in exp_ids:
 
@@ -6931,8 +7800,8 @@ def main():
                     b_minus_a = model_b_explained_var - model_a_explained_var
 
                     subset_idx = np.where(
-                        (model_a_explained_var > 0) &
-                        (model_b_explained_var > 0) &
+                        (model_a_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > explained_var_threshold) &
                         (model_b_explained_var > model_a_explained_var)
                     )[0]
 
@@ -6941,16 +7810,61 @@ def main():
                         (model_b_explained_var <= model_a_explained_var)
                     )[0]
 
-                    vis_and_saccade_neuron_subset_idx = np.where(
-                        (model_a_explained_var > 0) &
-                        (model_b_explained_var > 0) &
+                    subset_idx = np.where(
+                        (model_a_explained_var > explained_var_threshold) &
+                        (model_b_explained_var > explained_var_threshold) &
                         (model_b_explained_var > model_a_explained_var)
                     )[0]
 
+                elif neuron_subset_condition == 'better_than_null':
+
+                    model_a = null_X_set
+                    model_b = model_X_set_to_plot
+
+                    model_a_idx = np.where(X_sets_names == model_a)[0][0]
+                    model_b_idx = np.where(X_sets_names == model_b)[0][0]
+
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    subset_idx = np.where(
+                        (model_b_explained_var > model_a_explained_var) &
+                        (model_b_explained_var > explained_var_threshold)
+                    )[0]
+
+                elif neuron_subset_condition == 'both_vis_dir_and_saccade_dir_selective':
+
+                    # Get sig saccade dir neurons
+                    model_a_idx = np.where(X_sets_names == 'vis_and_saccade_and_running')[0][0]
+                    model_b_idx = np.where(X_sets_names == 'vis_and_saccade_on_and_running')[0][0]
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    saccade_dir_sig_idx = np.where(
+                        (model_a_explained_var > model_b_explained_var) &
+                        (model_a_explained_var > explained_var_threshold)
+                    )[0]
+
+                    # Get sig vis dir neurons
+                    model_a_idx = np.where(X_sets_names == 'vis_and_saccade_and_running')[0][0]
+                    model_b_idx = np.where(X_sets_names == 'vis_on_and_saccade_and_running')[0][0]
+                    model_a_explained_var = explained_var_per_X_set[:, model_a_idx]
+                    model_b_explained_var = explained_var_per_X_set[:, model_b_idx]
+
+                    vis_dir_sig_idx = np.where(
+                        (model_a_explained_var > model_b_explained_var) &
+                        (model_a_explained_var > explained_var_threshold)
+                    )[0]
+
+                    subset_idx = np.intersect1d(saccade_dir_sig_idx, vis_dir_sig_idx)
+
+                else:
+                    subset_idx = np.arange(0, np.shape(explained_var_per_X_set)[0])
 
                 # Get the kernels
                 model_weights_per_X_set = regression_result['model_weights_per_X_set'].item()
                 X_set_weights = model_weights_per_X_set[model_X_set_to_plot]  # numCV x numNeuron x numFeatures
+                n_cv_folds = np.shape(X_set_weights)[0]
                 feature_name_and_indices = regression_result['feature_indices_per_X_set'].item()[model_X_set_to_plot]
                 regression_kernel_windows = regression_result['regression_kernel_windows']
                 saccade_on_kernel_idx = np.where(regression_result['regression_kernel_names'] == 'saccade_on')[0][0]
@@ -6959,67 +7873,173 @@ def main():
                 saccade_onset_kernel_indices = feature_name_and_indices['saccade_on']
                 saccade_dir_kernel_indices = feature_name_and_indices['saccade_dir']
 
-                saccade_on_kernels = np.mean(X_set_weights[:, vis_and_saccade_neuron_subset_idx, :][:, :, saccade_onset_kernel_indices], axis=0)
-                saccade_dir_kernels = np.mean(X_set_weights[:, vis_and_saccade_neuron_subset_idx, :][:, :, saccade_dir_kernel_indices], axis=0)
+                saccade_on_kernels = X_set_weights[:, subset_idx, :][:, :, saccade_onset_kernel_indices]
+                saccade_dir_kernels = X_set_weights[:, subset_idx, :][:, :, saccade_dir_kernel_indices]
 
                 saccade_on_peri_event_window = np.linspace(saccade_on_window[0], saccade_on_window[1],
                                                            len(saccade_onset_kernel_indices))
                 post_saccade_idx = np.where(saccade_on_peri_event_window >= 0)[0]
+                for kernel_name in kernels_to_plot:
 
-                if x_axis_kernel == 'saccade_dir_nasal':
+                    if kernel_name == 'saccade_temporal':
+                        saccade_temporal_kernels = saccade_on_kernels + saccade_dir_kernels
+                        # get only post-saccade time window
+                        if kernel_metric == 'mean':
+                            kernel_val = np.mean(saccade_temporal_kernels[:, :, post_saccade_idx],
+                                                                                 axis=2)
+                        elif kernel_metric == 'peak':
+                            # TODO
+                            # include pre-saccade time window (?)
+                            saccade_temporal_kernels_peak_loc = np.argmax(np.abs(saccade_temporal_kernels), axis=1)
+                            # saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels[:, post_saccade_idx]), axis=1)
+                            exp_y_vals = []
+                            for n_neuron in np.arange(np.shape(saccade_temporal_kernels)[0]):
+                                exp_y_vals.append(
+                                    saccade_temporal_kernels[n_neuron, saccade_temporal_kernels_peak_loc[n_neuron]])
 
-                    # get only post-saccade time window
-                    saccade_nasal_kernels = saccade_on_kernels - saccade_dir_kernels
-                    saccade_nasal_kernels_post_saccade_mean = np.mean(saccade_nasal_kernels[:, post_saccade_idx], axis=1)
-                    exp_x_vals = saccade_nasal_kernels_post_saccade_mean
+
+                    elif kernel_name == 'saccade_nasal':
+
+                        # get only post-saccade time window
+                        saccade_nasal_kernels = saccade_on_kernels - saccade_dir_kernels
+                        if kernel_metric == 'mean':
+                            kernel_val = np.mean(saccade_nasal_kernels[:, :, post_saccade_idx], axis=2)
+                        elif kernel_metric == 'peak':
+                            # include pre-saccade time window (?)
+                            saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels), axis=1)
+                            # saccade_nasal_kernels_peak_loc = np.argmax(np.abs(saccade_nasal_kernels[:, post_saccade_idx]), axis=1)
+                            exp_x_vals = []
+                            for n_neuron in np.arange(np.shape(saccade_nasal_kernels)[0]):
+                                exp_x_vals.append(
+                                    saccade_nasal_kernels[n_neuron, saccade_nasal_kernels_peak_loc[n_neuron]])
+
+                    all_exp_kernel_vals_per_cv[kernel_name].append(kernel_val)
 
 
-                if y_axis_kernel == 'saccade_dir_temporal':
+        for kernel_name in kernels_to_plot:
 
-                    # get only post-saccade time window
-                    saccade_temporal_kernels = saccade_on_kernels + saccade_dir_kernels
-                    saccade_temporal_kernels_post_saccade_mean = np.mean(saccade_temporal_kernels[:, post_saccade_idx],
-                                                                      axis=1)
-                    exp_y_vals = saccade_temporal_kernels_post_saccade_mean
+            kernel_cv_vals = np.concatenate(all_exp_kernel_vals_per_cv[kernel_name], axis=1)
 
-                # Make plot for individual experiment
-
-                with plt.style.context(splstyle.get_style('nature-reviews')):
-
-                    fig, ax = plt.subplots()
-                    fig.set_size_inches(4, 4)
-
-                    ax.scatter(exp_x_vals, exp_y_vals, s=9, color='black')
-
-                    ax.set_xlabel(x_axis_kernel, size=11)
-                    ax.set_ylabel(y_axis_kernel, size=11)
-                    ax.set_title(exp_id, size=11)
-                    fig_name = '%s_%s_vs_%s_kernel' % (exp_id, x_axis_kernel, y_axis_kernel)
-                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
-
-                plt.close(fig)
-
-                # accumulate neurons across all experiments
-                all_exp_x_vals.extend(exp_x_vals)
-                all_exp_y_vals.extend(exp_y_vals)
-
-            # Make plot for all experiments
             with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, axs = plt.subplots(n_cv_folds, n_cv_folds, sharex=True, sharey=True)
+                fig.set_size_inches(n_cv_folds * 2, n_cv_folds * 2)
 
-                fig, ax = plt.subplots()
-                fig.set_size_inches(4, 4)
+                all_vals_min = np.min(kernel_cv_vals.flatten())
+                all_vals_max = np.max(kernel_cv_vals.flatten())
 
-                ax.scatter(all_exp_x_vals, all_exp_y_vals, s=9, color='black')
+                for cv_j, cv_k in itertools.product(np.arange(n_cv_folds), np.arange(n_cv_folds)):
 
-                ax.set_xlabel(x_axis_kernel, size=11)
-                ax.set_ylabel(y_axis_kernel, size=11)
-                ax.set_title('All exps', size=11)
-                fig_name = 'all_exp_%s_vs_%s_kernel' % (x_axis_kernel, y_axis_kernel)
+                    axs[cv_j, cv_k].scatter(kernel_cv_vals[cv_j, :],
+                                            kernel_cv_vals[cv_k, :], color='black', s=8, lw=0)
+
+                    axs[cv_j, cv_k].set_xlabel('CV %.f' % (cv_j+1), size=11)
+                    axs[cv_j, cv_k].set_ylabel('CV %.f' % (cv_k+1), size=11)
+                    axs[cv_j, cv_k].set_xlim([all_vals_min, all_vals_max])
+                    axs[cv_j, cv_k].set_ylim([all_vals_min, all_vals_max])
+
+                fig.suptitle('All %s exp %s %s' % (exp_type, kernel_name, kernel_metric), size=11)
+                fig_name = 'all_%s_exp_train_test_%s_kernel_%s' % (exp_type, kernel_name, kernel_metric)
                 fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
-
 
             plt.close(fig)
 
+
+
+        if process == 'plot_running_weights':
+
+            print('Plotting running weights')
+
+            fig_folder = process_params[process]['fig_folder']
+            both_exp_model = process_params[process]['both_exp_model']
+            grating_exp_model = process_params[process]['grating_exp_model']
+            gray_exp_model = process_params[process]['gray_exp_model']
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
+
+            regression_results_folder = process_params[process]['regression_results_folder']
+            regression_result_files = glob.glob(os.path.join(regression_results_folder,
+                                                             '*%s*npz' % 'both'))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       regression_result_files]
+
+            all_both_exp_running_weights = []
+            all_gray_exp_running_weights = []
+            all_grating_exp_running_weights = []
+
+            for exp_id in exp_ids:
+
+                # Both experiments
+                both_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, 'both')))[0],
+                    allow_pickle=True)
+
+                X_sets_names = both_regression_result['X_sets_names']
+                explained_var_per_X_set = both_regression_result['explained_var_per_X_set']
+                
+                # Get the running weights for both exp
+                feature_name_and_indices = both_regression_result['feature_indices_per_X_set'].item()[both_exp_model]
+                running_kernel_idx = np.where(both_regression_result['regression_kernel_names'] == 'running')[0][0]
+                model_weights_per_X_set = both_regression_result['model_weights_per_X_set'].item()
+                both_exp_X_set_weights = model_weights_per_X_set[both_exp_model]  # numCV x numNeuron x numFeatures
+
+                both_exp_running_weights = np.mean(both_exp_X_set_weights[:, :, running_kernel_idx], axis=0)
+                all_both_exp_running_weights.append(both_exp_running_weights)
+
+                # Gray experiments
+                gray_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, 'gray')))[0],
+                    allow_pickle=True)
+                feature_name_and_indices = gray_regression_result['feature_indices_per_X_set'].item()[gray_exp_model]
+                running_kernel_idx = np.where(gray_regression_result['regression_kernel_names'] == 'running')[0][0]
+                model_weights_per_X_set = gray_regression_result['model_weights_per_X_set'].item()
+                gray_exp_X_set_weights = model_weights_per_X_set[gray_exp_model]  # numCV x numNeuron x numFeatures
+
+                gray_exp_running_weights = np.mean(gray_exp_X_set_weights[:, :, running_kernel_idx], axis=0)
+                all_gray_exp_running_weights.append(gray_exp_running_weights)
+
+                # Grating experiments
+                grating_regression_result = np.load(
+                    glob.glob(os.path.join(regression_results_folder, '*%s*%s*.npz' % (exp_id, 'grating')))[0],
+                    allow_pickle=True)
+                feature_name_and_indices = grating_regression_result['feature_indices_per_X_set'].item()[grating_exp_model]
+                running_kernel_idx = np.where(grating_regression_result['regression_kernel_names'] == 'running')[0][0]
+                model_weights_per_X_set = grating_regression_result['model_weights_per_X_set'].item()
+                grating_exp_X_set_weights = model_weights_per_X_set[grating_exp_model]  # numCV x numNeuron x numFeatures
+
+                grating_exp_running_weights = np.mean(grating_exp_X_set_weights[:, :, running_kernel_idx], axis=0)
+                all_grating_exp_running_weights.append(grating_exp_running_weights)
+
+                # Plot the distribution of the weights
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, axs = plot_running_weight_dist(both_exp_running_weights,
+                                                        gray_exp_running_weights,
+                                                        grating_exp_running_weights)
+
+                fig_name = '%s_running_weight_distribution.png' % (exp_id)
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                plt.close(fig)
+
+            # Plot all experiments
+            all_both_exp_running_weights = np.concatenate(all_both_exp_running_weights)
+            all_gray_exp_running_weights = np.concatenate(all_gray_exp_running_weights)
+            all_grating_exp_running_weights = np.concatenate(all_grating_exp_running_weights)
+
+            # Truncate some outliers for visualization
+            all_grating_exp_running_weights = all_grating_exp_running_weights[all_grating_exp_running_weights < 5]
+
+            # pdb.set_trace()
+
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, axs = plot_running_weight_dist(all_both_exp_running_weights,
+                                                    all_gray_exp_running_weights,
+                                                    all_grating_exp_running_weights)
+
+            fig_name = 'all_exp_running_weight_distribution.png'
+            fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+            plt.close(fig)
 
 
 if __name__ == '__main__':
