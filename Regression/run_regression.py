@@ -37,6 +37,7 @@ from tqdm import tqdm  # loading bar
 import statsmodels.api as sm
 from pymer4.models import Lmer
 import scipy.optimize as spopt
+import scipy.io as spio
 import scipy
 import cmath  # for circular statistics
 
@@ -157,6 +158,65 @@ def load_data(data_folder, file_types_to_load=['_windowVis'],
 
     return data
 
+
+def loadmat(filename, struct_as_record=False):
+    '''
+    this function should be called instead of direct spio.loadmat
+    as it cures the problem of not properly recovering python dictionaries
+    from mat files. It calls the function check keys to cure all entries
+    which are still mat-objects
+
+    struct_as_record : if True, you access fields using data['field']
+    if False, you access field using dot notation: data.field
+
+    '''
+
+    def _check_keys(d):
+        '''
+        checks if entries in dictionary are mat-objects. If yes
+        todict is called to change them to nested dictionaries
+        '''
+        for key in d:
+            if isinstance(d[key], spio.matlab.mio5_params.mat_struct):
+                d[key] = _todict(d[key])
+        return d
+
+    def _todict(matobj):
+        '''
+        A recursive function which constructs from matobjects nested dictionaries
+        '''
+        d = {}
+        for strg in matobj._fieldnames:
+            elem = matobj.__dict__[strg]
+            if isinstance(elem, spio.matlab.mio5_params.mat_struct):
+                d[strg] = _todict(elem)
+            elif isinstance(elem, np.ndarray):
+                # TS: Make sure numpy array is at least 1 dimensional
+                # Otherwise the loop in _tolist() will complain about 0-d arrays.
+                elem = np.atleast_1d(elem)
+                d[strg] = _tolist(elem)
+            else:
+                d[strg] = elem
+        return d
+
+    def _tolist(ndarray):
+        '''
+        A recursive function which constructs lists from cellarrays
+        (which are loaded as numpy ndarrays), recursing into the elements
+        if they contain matobjects.
+        '''
+        elem_list = []
+        for sub_elem in ndarray:
+            if isinstance(sub_elem, spio.matlab.mio5_params.mat_struct):
+                elem_list.append(_todict(sub_elem))
+            elif isinstance(sub_elem, np.ndarray):
+                elem_list.append(_tolist(sub_elem))
+            else:
+                elem_list.append(sub_elem)
+        return elem_list
+
+    data = spio.loadmat(filename, struct_as_record=struct_as_record, squeeze_me=True)
+    return _check_keys(data)
 
 def load_running_data(exp_folder):
     """
@@ -1098,6 +1158,20 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
                     Y_neuron[time_idx_to_exclude] = np.nan
                     X_neuron[time_idx_to_exclude, :] = np.nan
 
+                elif (exp_type == 'both') and exclude_saccade_on_vis_exp:
+
+                    # in this case exp_saccade_onset_times is the gray exp saccade with offset, so the same code can apply
+                    time_idx_to_exclude = np.where(
+                        (exp_times >= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[
+                            0]) &
+                        (exp_times <= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[
+                            1])
+                    )[0]
+
+                    Y_neuron[time_idx_to_exclude] = np.nan
+                    X_neuron[time_idx_to_exclude, :] = np.nan
+
+
             subset_index = np.where(~np.isnan(np.sum(X_neuron, axis=1)))[0]
             # subset_index = np.where(~np.isnan(X_neuron))[0]
             X_per_neuron.append(X_neuron[subset_index, :])
@@ -1108,6 +1182,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             return X_per_neuron, Y_per_neuron, grating_orientation_per_trial, saccade_dirs, feature_indices, subset_index_per_neuron
         else:
             return X_per_neuron, Y_per_neuron, feature_indices, subset_index_per_neuron
+
 
     if exclude_saccade_any_off_screen_times and (exp_type != 'grating'):
 
@@ -2894,10 +2969,11 @@ def main():
                            'plot_kernel_fit_raster',
                            'plot_kernel_scatter',
                            'plot_running_weights',
-                           'plot_kernel_train_test']
+                           'plot_kernel_train_test', 
+                           'plot_before_after_saccade_exclusion_ev']
 
 
-    processes_to_run = ['plot_regression_model_explained_var']
+    processes_to_run = ['plot_kernel_fit_raster']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis/New',
@@ -2936,13 +3012,13 @@ def main():
                                 ],
             exp_ids=[
                      # 'SS041_2015-04-23',
-                     # 'SS044_2015-04-28',
-                     # 'SS045_2015-05-04',
+                     'SS044_2015-04-28',
+                     'SS045_2015-05-04',
                      'SS045_2015-05-05',
-                     # 'SS047_2015-11-23',
-                     # 'SS047_2015-12-03',
-                     # 'SS048_2015-11-09',
-                     # 'SS048_2015-12-02'
+                     'SS047_2015-11-23',
+                     'SS047_2015-12-03',
+                     'SS048_2015-11-09',
+                     'SS048_2015-12-02'
                     ],
             X_sets_to_compare={
                                'bias_only': ['bias'],
@@ -2957,17 +3033,17 @@ def main():
                                # 'saccade_and_pupil': ['bias', 'saccade_on', 'saccade_dir', 'pupil_size'],
                                # 'vis_and_saccade': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir'],
                                # 'vis_ori_and_saccade': ['bias', 'vis_ori', 'saccade_on', 'saccade_dir'],
-                               # 'vis_and_running': ['bias', 'vis_on', 'vis_dir', 'running'],
+                               'vis_and_running': ['bias', 'vis_on', 'vis_dir', 'running'],
                                # 'vis_ori_and_running': ['bias', 'vis_ori', 'running'],
                                # 'vis_and_saccade_and_pupil': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'pupil_size'],
-                               # 'vis_on_and_saccade_and_running':  ['bias', 'vis_on', 'saccade_on', 'saccade_dir', 'running'],
-                               # 'vis_and_saccade_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'running'],
-                               # 'vis_and_saccade_on_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'running'],
+                               'vis_on_and_saccade_and_running':  ['bias', 'vis_on', 'saccade_on', 'saccade_dir', 'running'],
+                               'vis_and_saccade_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'saccade_dir', 'running'],
+                               'vis_and_saccade_on_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_on', 'running'],
                                # 'vis_and_saccade_nt_and_running': ['bias', 'vis_on', 'vis_dir', 'saccade_nasal', 'saccade_temporal', 'running'],
-                               'running': ['bias', 'running'],
+                               # 'running': ['bias', 'running'],
                                # 'saccade': ['bias', 'saccade_on', 'saccade_dir'],
-                               'saccade_and_running': ['bias', 'saccade_on', 'saccade_dir', 'running'],
-                               'saccade_on_and_running': ['bias', 'saccade_dir', 'running'],
+                               # 'saccade_and_running': ['bias', 'saccade_on', 'saccade_dir', 'running'],
+                               # 'saccade_on_and_running': ['bias', 'saccade_dir', 'running'],
                                # 'saccade_shuffled_and_running': ['bias', 'saccade_on_shuffled', 'saccade_dir_shuffled', 'running'],
                                # 'saccade_nt': ['bias', 'saccade_nasal', 'saccade_temporal'],
                                # 'vis_ori_and_saccade_and_running': ['bias', 'vis_ori', 'saccade_on', 'saccade_dir', 'running'],
@@ -2992,8 +3068,8 @@ def main():
             performance_metrics=['explained_variance', 'r2'],
             aligned_explained_var_time_windows={'vis': [0, 3],  # originally [0, 3]
                                                 'saccade': [-0.5, 0.5]},  # originally [0, 0.5]
-            exp_type='gray',  # 'grating', 'gray', 'both'
-            exclude_saccade_on_vis_exp=False,
+            exp_type='both',  # 'grating', 'gray', 'both'
+            exclude_saccade_on_vis_exp=True,
             exclude_saccade_off_screen_times=True,
             exclude_saccade_any_off_screen_times=False,
             saccade_off_screen_exclusion_window=[-0.5, 0.5],
@@ -3414,11 +3490,12 @@ def main():
         ),
         'plot_kernel_fit_raster': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
-            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
-            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/weights_raster/',
-            model_X_set_to_plot='vis_and_saccade_and_running',
-            exp_type='both',
-            sort_method='Anya',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/exclude-off-screen',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/weights_raster/exclude-off-screen',
+            model_X_set_to_plot='saccade_and_running',  # vis_and_saccade_and_running / saccade_and_running for gray screen
+            exp_type='gray',  # 'gray' or 'both'
+            sort_method='Anya-identical',
+            kernels_to_include=['saccade_on', 'saccade_dir'],   #'vis_on', 'vis_dir',
             transform_dir_to_temporal_nasal=True,
             explained_var_threshold=0.02,
             file_types_to_load=['_windowVis', '_tracesVis', '_trial_Dir', '_saccadeVisDir',
@@ -3431,8 +3508,8 @@ def main():
         ),
         'plot_kernel_scatter': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
-            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
-            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/kernel_scatter/',
+            regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/exclude-off-screen',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/kernel_scatter/exclude-off-screen',
             neuron_subset_condition='better_than_null',  # 'sig_saccade_neurons' or 'better_than_null', 'both_vis_dir_and_saccade_dir_selective'
             model_X_set_to_plot='saccade_and_running',  # vis_and_saccade_and_running, saccade_and_running
             null_X_set='running',   # 'running', or 'vis_and_running'
@@ -3440,7 +3517,7 @@ def main():
             exp_type='gray',  # 'gray', 'grating', 'both'
             x_axis_kernel='saccade_dir_nasal',  # 'vis_dir_nasal' , saccade_dir_nasal
             y_axis_kernel='saccade_dir_temporal',  # 'vis_dir_temporal', 'saccade_dir_temporal'
-            kernel_metric='peak',   # 'mean' or 'peak'
+            kernel_metric='mean',   # 'mean' or 'peak'
             do_stats=True,
             same_x_y_range=False,
             plot_indv_lobf=False,  # line of best fit
@@ -3471,6 +3548,15 @@ def main():
             grating_exp_null_model='vis_and_saccade',
             gray_exp_model='saccade_and_running',
             gray_exp_null_model='saccade',
+        ), 
+        'plot_before_after_saccade_exclusion_ev': dict(
+            data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/regression/before-after-saccade-exclusion',
+            before_regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults',
+            after_regression_results_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/exclude-off-screen',
+            exp_type='gray',
+            metric_to_plot='saccade_aligned_var_explained',  # explained_var_per_X_set, saccade_aligned_var_explained
+            plot_kernel_traces=True,
         )
     }
 
@@ -3540,17 +3626,22 @@ def main():
                     fig.set_size_inches(6, 4)
                     gray_screen_in_per_neuron = exp_data['_inPerNeuron']  # trial x neuron
                     ax.imshow(gray_screen_in_per_neuron, aspect='auto')
+
+                    ax.set_xlabel('Neuron', size=11)
+                    ax.set_ylabel('Saccade trial', size=11)
+
                     num_in_screen_per_neuron = np.sum(gray_screen_in_per_neuron, axis=0)
                     num_1_trial = len(np.where(num_in_screen_per_neuron >= 1)[0])
                     num_2_trial = len(np.where(num_in_screen_per_neuron >= 2)[0])
                     num_5_trial = len(np.where(num_in_screen_per_neuron >= 5)[0])
                     num_10_trial = len(np.where(num_in_screen_per_neuron >= 10)[0])
 
-                    ax.set_title('''Number of neurons with at least 1 usable trial: %.f, 
+                    ax.set_title('''%s
+                                  Number of neurons with at least 1 usable trial: %.f, 
                                   2 usable trials: %.f 
                                   5 usable trials: %.f  
                                   10 usable trials: %.f'''
-                                 % (num_1_trial, num_2_trial, num_5_trial, num_10_trial), size=9)
+                                 % (exp_id, num_1_trial, num_2_trial, num_5_trial, num_10_trial), size=9)
 
                     fig_name = '%s_%s_inPerNeuron' % (exp_id, exp_type)
                     fig_path = os.path.join(fig_folder, fig_name)
@@ -7581,6 +7672,7 @@ def main():
             transform_dir_to_temporal_nasal = process_params[process]['transform_dir_to_temporal_nasal']
             explained_var_threshold = process_params[process]['explained_var_threshold']
             exp_type = process_params[process]['exp_type']
+            kernels_to_include = process_params[process]['kernels_to_include']
             excited_threshold = 0.1
             inhibited_threshold = -0.1
 
@@ -7593,15 +7685,53 @@ def main():
 
             regression_results_folder = process_params[process]['regression_results_folder']
             regression_result_files = glob.glob(os.path.join(regression_results_folder,
-                                                             '*%s*npz' % 'grating'))
+                                                             '*%s*npz' % exp_type))
             exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
                        regression_result_files]
 
 
             # Compare the temporal profile of the saccade kernels
-            exp_type = 'both'
 
             all_X_set_weights_all_mean = []
+
+            if sort_method == 'Anya-identical':
+
+                print('Using sorting method exactly identical to Anya, so will override EV threshold to None')
+                explained_var_threshold = -np.inf
+
+                sort_mat_filepath = '/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/RegressionResults/sorting-info/orderMatrix.mat'
+                sort_data = loadmat(sort_mat_filepath)['orderMatrix']
+
+                all_neuron_within_exp_sort_id = []
+                all_neuron_group_sort_id = []
+                for neuron_type, sort_prop in sort_data.items():
+                    neuron_id = sort_prop['neuronIDs']
+                    group_id = sort_prop['group']
+
+                    if type(neuron_id) is int:
+                        neuron_id = [neuron_id]
+                        group_id = [group_id]
+                    all_neuron_within_exp_sort_id.extend(neuron_id)
+                    all_neuron_group_sort_id.extend(group_id)
+
+                # this is info from Anya
+                group_id_number_to_exp_name = {
+                    1: 'SS041_2015-04-23',
+                    2: 'SS044_2015-04-28',
+                    3: 'SS045_2015-05-04',
+                    4: 'SS045_2015-05-05',
+                    5: 'SS047_2015-11-23',
+                    6: 'SS047_2015-12-03',
+                    7: 'SS048_2015-11-09',
+                    8: 'SS048_2015-12-02',
+                }
+                
+                exp_name_to_group_id = {x: y for (y, x) in group_id_number_to_exp_name.items()}
+
+                all_neuron_within_exp_id = []
+                all_neuron_group_ids = []
+                all_neuron_ev = []
+                
 
             for exp_id in exp_ids:
                 # Experiment data
@@ -7622,17 +7752,22 @@ def main():
 
 
                 if transform_dir_to_temporal_nasal:
-                    vis_on_idx = feature_name_and_indices['vis_on']
-                    vis_dir_idx = feature_name_and_indices['vis_dir']
+
+                    if 'vis_on' in kernels_to_include:
+                        vis_on_idx = feature_name_and_indices['vis_on']
+                    if 'vis_dir' in kernels_to_include:
+                        vis_dir_idx = feature_name_and_indices['vis_dir']
+
                     saccade_on_idx = feature_name_and_indices['saccade_on']
                     saccade_dir_idx = feature_name_and_indices['saccade_dir']
 
                     X_set_weights_all_mean_transformed = X_set_weights_all_mean.copy()
 
-                    X_set_weights_all_mean_transformed[:, vis_on_idx] = \
-                        X_set_weights_all_mean[:, vis_on_idx] - X_set_weights_all_mean[:, vis_dir_idx]
-                    X_set_weights_all_mean_transformed[:, vis_dir_idx] = \
-                        X_set_weights_all_mean[:, vis_on_idx] + X_set_weights_all_mean[:, vis_dir_idx]
+                    if 'vis_dir' in kernels_to_include:
+                        X_set_weights_all_mean_transformed[:, vis_on_idx] = \
+                            X_set_weights_all_mean[:, vis_on_idx] - X_set_weights_all_mean[:, vis_dir_idx]
+                        X_set_weights_all_mean_transformed[:, vis_dir_idx] = \
+                            X_set_weights_all_mean[:, vis_on_idx] + X_set_weights_all_mean[:, vis_dir_idx]
 
                     X_set_weights_all_mean_transformed[:, saccade_on_idx] = \
                         X_set_weights_all_mean[:, saccade_on_idx] - X_set_weights_all_mean[:, saccade_dir_idx]
@@ -7642,8 +7777,10 @@ def main():
 
                     X_set_weights_all_mean = X_set_weights_all_mean_transformed
 
-                    feature_name_and_indices['vis_nasal'] = feature_name_and_indices.pop('vis_on')
-                    feature_name_and_indices['vis_temporal'] = feature_name_and_indices.pop('vis_dir')
+                    if 'vis_dir' in kernels_to_include:
+                        feature_name_and_indices['vis_nasal'] = feature_name_and_indices.pop('vis_on')
+                        feature_name_and_indices['vis_temporal'] = feature_name_and_indices.pop('vis_dir')
+
                     feature_name_and_indices['saccade_nasal'] = feature_name_and_indices.pop('saccade_on')
                     feature_name_and_indices['saccade_temporal'] = feature_name_and_indices.pop('saccade_dir')
 
@@ -7673,6 +7810,15 @@ def main():
                                                         inhibited_threshold=inhibited_threshold)
 
                     X_set_weights_all_mean_sorted = X_set_weights_all_mean[sort_idx, :]
+
+                elif sort_method == 'Anya-identical':
+
+                    # Anya-identical methods only apply to "all recordings" sort, not single session sort
+                    num_neurons = np.shape(X_set_weights_all_mean)[0]
+                    all_neuron_group_ids.extend(np.repeat(exp_name_to_group_id[exp_id], num_neurons))
+                    all_neuron_within_exp_id.extend(np.arange(1, num_neurons+1))
+                    all_neuron_ev.extend(X_set_ev)
+                    continue
 
                     
                 elif sort_method == 'none':
@@ -7719,13 +7865,40 @@ def main():
                                                     inhibited_threshold=inhibited_threshold)
 
                 all_X_set_weights_all_mean_sorted = all_X_set_weights_all_mean[sort_idx, :]
+            
+            elif sort_method == 'Anya-identical':
+
+                num_neurons_to_sort = len(all_neuron_within_exp_sort_id)
+                num_features = np.shape(all_X_set_weights_all_mean)[1]
+
+                all_neuron_within_exp_id = np.array(all_neuron_within_exp_id)
+                all_neuron_group_ids = np.array(all_neuron_group_ids)
+
+                all_X_set_weights_all_mean_sorted = np.zeros((num_neurons_to_sort, num_features))
+                all_used_neurons_explained_variance = np.zeros((num_neurons_to_sort, ))
+
+                # this is the slow and naive way but it works
+                for n_idx in np.arange(num_neurons_to_sort):
+
+                    neuron_idx_to_get = np.where(
+                        (all_neuron_within_exp_id == all_neuron_within_exp_sort_id[n_idx]) &
+                        (all_neuron_group_ids == all_neuron_group_sort_id[n_idx])
+                    )[0][0]
+
+                    all_X_set_weights_all_mean_sorted[n_idx, :] = all_X_set_weights_all_mean[neuron_idx_to_get, :]
+                    all_used_neurons_explained_variance[n_idx] = all_neuron_ev[neuron_idx_to_get]
 
             elif sort_method == 'none':
                 all_X_set_weights_all_mean_sorted = all_X_set_weights_all_mean
 
             with plt.style.context(splstyle.get_style('nature-reviews')):
                 fig, ax = plt.subplots()
-                fig.set_size_inches(5, 4)
+
+                if 'vis_on' in kernels_to_include:
+                    fig.set_size_inches(5, 4)
+                else:
+                    fig.set_size_inches(4, 4)
+
                 ax.imshow(all_X_set_weights_all_mean_sorted, cmap='bwr', vmin=-1, vmax=1,
                           interpolation='none', aspect='auto')
 
@@ -7741,8 +7914,20 @@ def main():
                 exp_type, model_X_set_to_plot, sort_method)
                 if transform_dir_to_temporal_nasal:
                     fig_name += '_transformed_to_temporal_nasal'
+                fig_path = os.path.join(fig_folder, fig_name)
+                fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+                print('Saved figure to %s' % fig_path)
 
-                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+            if sort_method == 'Anya-identical':
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, ax = plt.subplots()
+                    fig.set_size_inches(5, 4)
+
+                    ax.hist(all_used_neurons_explained_variance, lw=0, color='black', bins=50)
+
+                    fig_name = 'Anja_identical_method_EV_distribution'
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
 
         if process == 'plot_kernel_scatter':
 
@@ -7958,7 +8143,6 @@ def main():
                     exp_y_vals = 2 * np.mean(saccade_dir_kernels, axis=1)  # take the mean across time
 
                 # Make plot for individual experiment
-
                 with plt.style.context(splstyle.get_style('nature-reviews')):
 
                     fig, ax = plt.subplots()
@@ -8377,6 +8561,147 @@ def main():
 
             fig_name = 'all_exp_running_weight_distribution.png'
             fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+            plt.close(fig)
+        
+        if process == 'plot_before_after_saccade_exclusion_ev':
+
+            exp_type = process_params[process]['exp_type']
+            fig_folder = process_params[process]['fig_folder']
+            before_regression_results_folder = process_params[process]['before_regression_results_folder']
+            after_regression_results_folder = process_params[process]['after_regression_results_folder']
+            metric_to_plot = process_params[process]['metric_to_plot']
+            plot_kernel_traces = process_params[process]['plot_kernel_traces']
+            
+            before_regression_result_files = glob.glob(os.path.join(before_regression_results_folder,
+                                                             '*%s*npz' % exp_type))
+            exp_ids = ['_'.join(os.path.basename(fpath).split('.')[0].split('_')[0:2]) for fpath in
+                       before_regression_result_files]
+
+            all_exp_x_vals = []
+            all_exp_y_vals = []
+            all_subject = []
+            all_exp = []
+
+            prop_sig_neurons_before = []
+            prop_sig_neurons_after = []
+
+            for exp_id in exp_ids:
+                
+                before_regression_result = np.load(
+                    glob.glob(os.path.join(before_regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+
+                after_regression_result = np.load(
+                    glob.glob(os.path.join(after_regression_results_folder, '*%s*%s*.npz' % (exp_id, exp_type)))[0],
+                    allow_pickle=True)
+                
+                X_sets_names = before_regression_result['X_sets_names']
+                before_explained_var_per_X_set = before_regression_result[metric_to_plot]
+                after_explained_var_per_X_set = after_regression_result[metric_to_plot]
+
+                model_X_set_to_plot = 'saccade_and_running'
+                X_set_idx = np.where(X_sets_names == model_X_set_to_plot)[0][0]
+
+                x_vals = before_explained_var_per_X_set[:, X_set_idx]
+                y_vals = after_explained_var_per_X_set[:, X_set_idx]
+
+                prop_sig_neurons_before.append(np.sum(x_vals > 0) / len(x_vals))
+                prop_sig_neurons_after.append(np.sum(y_vals > 0) / len(y_vals))
+
+                x_y_vals = np.concatenate([
+                    before_explained_var_per_X_set[:, X_set_idx],
+                    after_explained_var_per_X_set[:, X_set_idx]
+                ])
+
+                x_y_min = -0.1 # np.nanmin(x_y_vals)
+                x_y_max = np.nanmax(x_y_vals)
+                unity_vals = np.linspace(x_y_min, x_y_max, 100)
+
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, ax = plt.subplots()
+                    fig.set_size_inches(4, 4)
+
+                    ax.plot(unity_vals, unity_vals, linestyle='--', color='gray')
+                    ax.axvline(0, linestyle='--', lw=0.5, color='gray', alpha=0.5)
+                    ax.axhline(0, linestyle='--', lw=0.5, color='gray', alpha=0.5)
+                    ax.scatter(before_explained_var_per_X_set[:, X_set_idx],
+                               after_explained_var_per_X_set[:, X_set_idx], lw=0, color='black', s=8)
+                    
+
+                    ax.set_xlim([x_y_min, x_y_max])
+                    ax.set_ylim([x_y_min, x_y_max])
+
+                    ax.set_xlabel('All saccades', size=11)
+                    ax.set_ylabel('In-screen saccades', size=11)
+                    ax.set_title('%s %s %s' % (exp_id, exp_type, metric_to_plot), size=11)
+
+                    fig_name = '%s_%s_before_after_saccade_exclusion_%s_%s' % (exp_type, exp_id, metric_to_plot, model_X_set_to_plot)
+                    fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                plt.close(fig)
+
+                if plot_kernel_traces:
+
+                    both_sig_indices = np.where((x_vals > 0) & (y_vals > 0))[0]
+
+
+                    before_model_weights_per_X_set = before_regression_result['model_weights_per_X_set'].item()
+                    before_X_set_weights = np.mean(before_model_weights_per_X_set[model_X_set_to_plot], axis=0)  # numCV x numNeuron x numFeatures
+
+                    after_model_weights_per_X_set = after_regression_result['model_weights_per_X_set'].item()
+                    after_X_set_weights = np.mean(after_model_weights_per_X_set[model_X_set_to_plot], axis=0)  # numCV x numNeuron x numFeatures
+
+                    feature_name_and_indices = before_regression_result['feature_indices_per_X_set'].item()[
+                        model_X_set_to_plot]
+
+                    saccade_on_idx = feature_name_and_indices['saccade_on']
+                    saccade_dir_idx = feature_name_and_indices['saccade_dir']
+
+
+                    regression_kernel_windows = before_regression_result['regression_kernel_windows']
+                    saccade_on_kernel_idx = np.where(before_regression_result['regression_kernel_names'] == 'saccade_on')[0][0]
+                    saccade_on_window = regression_kernel_windows[saccade_on_kernel_idx]
+
+                    for neuron_idx in both_sig_indices:
+
+                        with plt.style.context(splstyle.get_style('nature-reviews')):
+
+                            fig, axs = plt.subplots(1, 2)
+                            fig.set_size_inches(6, 3)
+
+                            axs[0].set_title('Saccade onset', size=11)
+                            axs[0].plot(before_X_set_weights[neuron_idx, saccade_on_idx], color='black')
+                            axs[0].plot(after_X_set_weights[neuron_idx, saccade_on_idx], color='red')
+
+                            axs[1].set_title('Saccade direction', size=11)
+                            axs[1].plot(before_X_set_weights[neuron_idx, saccade_dir_idx], color='black', label='All saccades')
+                            axs[1].plot(after_X_set_weights[neuron_idx, saccade_dir_idx], color='red', label='In-screen saccades')
+
+                            axs[1].legend(bbox_to_anchor=(0.8, 0.7))
+
+                        fig_name = '%s_%s_%s_before_after_kernels' % (exp_id, exp_type, neuron_idx)
+                        fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+                        plt.close(fig)
+
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, ax = plt.subplots()
+                fig.set_size_inches(3, 3)
+                for n_exp, exp_id in enumerate(exp_ids):
+
+                    ax.plot([0, 1], [prop_sig_neurons_before[n_exp], prop_sig_neurons_after[n_exp]],
+                            label=exp_id, lw=1)
+
+                ax.legend(bbox_to_anchor=(0.8, 0.8))
+                ax.set_xticks([0, 1])
+                ax.set_xlim([-0.5, 1.5])
+                ax.set_xticklabels(['All saccade', 'In-screen saccade'])
+                ax.set_ylabel('Prop significant neurons', size=11)
+                ax.set_title('%s %s' % (exp_type, metric_to_plot), size=11)
+                fig_name = '%s_%s_each_exp_before_after_exclusion_prop_sig_neurons' % (exp_type, metric_to_plot)
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
 
             plt.close(fig)
 
