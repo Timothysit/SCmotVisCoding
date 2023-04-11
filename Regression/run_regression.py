@@ -1139,7 +1139,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
     
     
     # Do saccade off screen exclusion
-    if exclude_saccade_off_screen_times and (exp_type != 'grating'):
+    if exclude_saccade_off_screen_times:
 
         # Note this is only the gray screen saccades (???) 2023-04-02
         gray_exp_saccade_within_screen = exp_data['_inPerNeuron']  # Saccade trial x Neuron, 1 = within screen, 0 = outside screen
@@ -1157,6 +1157,7 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
         if exp_type == 'grating':
             vis_exp_saccade_within_screen = exp_data['_inPerNeuronVis']
             num_vis_saccade = np.shape(vis_exp_saccade_within_screen)[0]
+            assert np.shape(vis_exp_saccade_within_screen)[0] == len(vis_exp_saccade_onset_times)
 
         num_neurons = np.shape(exp_data['_inPerNeuron'])[1]
         # Loop through each neuron to exclude times where saccade was outside of the screen
@@ -1168,39 +1169,44 @@ def make_X_Y_for_regression(exp_data, feature_set=['bias', 'vis_on', 'vis_dir', 
             Y_neuron = Y.copy()[:, neuron_idx]
             gray_exp_saccade_off_screen_trials = np.where(gray_exp_saccade_within_screen[:, neuron_idx] == 0)[0]
 
-            for gray_exp_trial_idx in gray_exp_saccade_off_screen_trials:
-                if exp_type == 'gray':
+            if exp_type in ['gray', 'both']:
+                for gray_exp_trial_idx in gray_exp_saccade_off_screen_trials:
+                    if exp_type == 'gray':
 
-                    time_idx_to_exclude = np.where(
-                    (exp_times >= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[0]) &
-                    (exp_times <= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[1])
-                                                   )[0]
-
-                    Y_neuron[time_idx_to_exclude] = np.nan
-                    X_neuron[time_idx_to_exclude, :] = np.nan
-
-                elif (exp_type == 'both') and exclude_saccade_on_vis_exp:
-
-                    # in this case exp_saccade_onset_times is the gray exp saccade with offset, so the same code can apply
-                    time_idx_to_exclude = np.where(
+                        time_idx_to_exclude = np.where(
                         (exp_times >= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[0]) &
                         (exp_times <= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[1])
-                    )[0]
+                                                       )[0]
 
-                    Y_neuron[time_idx_to_exclude] = np.nan
-                    X_neuron[time_idx_to_exclude, :] = np.nan
-                elif exp_type == 'both':
-                    # in this case you need to offset the gray saccade trials (since exp_saccade_onset_times is vis, then gray concatenated)
-                    time_idx_to_exclude = np.where(
-                        (exp_times >= exp_saccade_onset_times[num_vis_saccade + gray_exp_trial_idx] + saccade_off_screen_exclusion_window[0]) &
-                        (exp_times <= exp_saccade_onset_times[num_vis_saccade + gray_exp_trial_idx] + saccade_off_screen_exclusion_window[1])
-                    )[0]
+                        Y_neuron[time_idx_to_exclude] = np.nan
+                        X_neuron[time_idx_to_exclude, :] = np.nan
 
-                    Y_neuron[time_idx_to_exclude] = np.nan
-                    X_neuron[time_idx_to_exclude, :] = np.nan
+                    elif (exp_type == 'both') and exclude_saccade_on_vis_exp:
+
+                        # in this case exp_saccade_onset_times is the gray exp saccade with offset, so the same code can apply
+                        time_idx_to_exclude = np.where(
+                            (exp_times >= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[0]) &
+                            (exp_times <= exp_saccade_onset_times[gray_exp_trial_idx] + saccade_off_screen_exclusion_window[1])
+                        )[0]
+
+                        Y_neuron[time_idx_to_exclude] = np.nan
+                        X_neuron[time_idx_to_exclude, :] = np.nan
+                    elif exp_type == 'both':
+                        # in this case you need to offset the gray saccade trials (since exp_saccade_onset_times is vis, then gray concatenated)
+                        time_idx_to_exclude = np.where(
+                            (exp_times >= exp_saccade_onset_times[num_vis_saccade + gray_exp_trial_idx] + saccade_off_screen_exclusion_window[0]) &
+                            (exp_times <= exp_saccade_onset_times[num_vis_saccade + gray_exp_trial_idx] + saccade_off_screen_exclusion_window[1])
+                        )[0]
+
+                        Y_neuron[time_idx_to_exclude] = np.nan
+                        X_neuron[time_idx_to_exclude, :] = np.nan
 
             # grating experiment exclude saccade off screen : here we also exclude the vis exp saccades
-            if exp_type == 'both':
+            # note here 'exp_times' is combined for 'both', and only grating exp times when exp_type == 'grating'
+            if exp_type == 'grating':
+                assert len(exp_times) == len(vis_exp_times)
+            
+            if exp_type in ['grating', 'both']:
                 vis_exp_saccade_off_screen_trials = np.where(vis_exp_saccade_within_screen[:, neuron_idx] == 0)[0]
                 for vis_exp_trial_idx in vis_exp_saccade_off_screen_trials:
                     time_idx_to_exclude = np.where(
@@ -1534,8 +1540,6 @@ def fit_regression_model(X, Y, model_type='Ridge', train_test_split_method='half
     Y_test_per_cv_set = []
     test_idx_per_set = []
     weights_per_cv_set = []
-
-    pdb.set_trace()
 
     for n_cv_set, (train_idx, test_idx) in enumerate(zip(train_indices, test_indices)):
 
@@ -3990,8 +3994,6 @@ def main():
 
                             # time indices with saccade off time excluded
                             subset_index = subset_index_per_neuron[neuron_idx]
-
-                            pdb.set_trace()
 
                             neuron_regression_result = fit_regression_model(X_neuron, Y[neuron_idx].reshape(-1, 1), performance_metrics=performance_metrics,
                                                              train_test_split_method=process_params[process]['train_test_split_method'],
