@@ -443,6 +443,7 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
                                             'remove_zero_variance_neurons', 'only_include_sig_neurons'],
                     include_shuffles=True,
                     num_shuffles=100, decode_onset=False, onset_baseline_time_window=[-0.15, -0.05],
+                    resp_w_t_2=None, tr_2=None,
                     verbose=False):
     """
     Do decoding for each time window (by taking the mean activity over the time window)
@@ -1091,6 +1092,18 @@ def cal_dprime(response, trial_id):
     return dprime
 
 
+def get_dprime(samples_1, samples_2, return_abs=True):
+
+    mean_diff = np.mean(samples_1) - np.mean(samples_2)
+    ave_std = (np.std(samples_1) + np.std(samples_2)) / 2
+    dprime = mean_diff / ave_std
+
+    if return_abs:
+        dprime = np.abs(dprime)
+
+    return dprime
+
+
 def plot_vis_vs_motor_dprime(visual_dprime, motor_dprime, center_zero=False, same_x_y_range=False,
                              fig=None, axs=None, labelsize=11):
     """
@@ -1710,9 +1723,10 @@ def main():
                            'fit_separate_decoders', 'plot_motor_and_visual_decoder_weights', 'plot_decoding_summary',
                            'fit_a_evaluate_on_a_and_b', 'plot_a_evaluate_on_a_and_b_results',
                            'cal_d_prime', 'plot_dprime', 'do_windowed_decoding', 'plot_windowed_decoding',
-                           'cal_amp_difference', 'plot_amp_difference', 'cal_trial_angles']
+                           'cal_amp_difference', 'plot_amp_difference', 'cal_trial_angles',
+                           'cal_trial_angles_train_test']
 
-    processes_to_run = ['plot_motor_and_visual_decoder_weights']
+    processes_to_run = ['do_windowed_decoding']
 
     process_params = {
         'test_load_data': dict(
@@ -1778,7 +1792,7 @@ def main():
             eyeMovementSubFolder='eyeMovementsLong',
             modality_a='motor',  # visual or motor
             modality_b='visual',  # visual or motor
-            decode_onset=True,
+            decode_onset=False,
             on_time_window=[0.05, 0.15],
             off_time_window=[-0.15, -0.05],
             pre_processing_steps=['exclude_nan_response', 'impute_nan_response', 'zscore_activity',
@@ -1870,6 +1884,18 @@ def main():
             off_time_window=[-0.15, -0.05],
             pre_processing_steps=['exclude_nan_response', 'impute_nan_response',
                                   'remove_zero_variance_neurons'],
+        ),
+        'cal_trial_angles_train_test': dict(
+            data_repo='/Users/timothysit/neurCorrEyeMove/decodingData/',
+            save_folder='/Users/timothysit/neurCorrEyeMove/decodingResults',
+            fig_folder='/Users/timothysit/neurCorrEyeMove/figures',
+            eyeMovementSubFolder='eyeMovementsLong',
+            decode_onset=False,
+            on_time_window=[0.05, 0.15],
+            off_time_window=[-0.15, -0.05],
+            pre_processing_steps=['exclude_nan_response', 'impute_nan_response',
+                                  'remove_zero_variance_neurons'],
+            fig_exts=['.png', '.svg'],
         )
     }
 
@@ -2317,8 +2343,12 @@ def main():
                 decode_onset_str = 'decode_onset_'
 
             else:
-                m_resp_ls, m_neun_ls, m_tr_ls, rec_name = load_data(os.path.join(data_repo, 'Motor'), 'motor')
-                v_resp_ls, v_neun_ls, v_tr_ls, _ = load_data(os.path.join(data_repo, 'Visual'), 'visual')
+                # I think these two lines are outdated??? (2023-01-15)
+                # m_resp_ls, m_neun_ls, m_tr_ls, rec_name = load_data(os.path.join(data_repo, 'Motor'), 'motor')
+                # v_resp_ls, v_neun_ls, v_tr_ls, _ = load_data(os.path.join(data_repo, 'Visual'), 'visual')
+
+                m_resp_ls, m_neun_ls, m_tr_ls, rec_name = load_data(os.path.join(data_repo, 'eyeMovements'), 'motor')
+                v_resp_ls, v_neun_ls, v_tr_ls, _ = load_data(os.path.join(data_repo, 'visualStim'), 'visual')
                 decode_onset_str = ''
 
             decoder_dict = defaultdict(list)
@@ -2528,6 +2558,7 @@ def main():
             if highlight_rec_name is not None:
                 highlight_index = np.where(np.array(rec_name) == highlight_rec_name)[0][0]
 
+            pdb.set_trace()
             with plt.style.context(splstyle.get_style('nature-reviews')):
                 fig, ax = plot_accuracy_of_decoders(accuracy_matrix=accuracy_matrix,
                                                     legend_labels=rec_name,
@@ -3149,6 +3180,484 @@ def main():
                 ax.scatter(cosine_angle_to_mot_a[3], cosine_angle_to_mot_b[3], color='red', marker='x')
                 """
 
+        if process == 'cal_trial_angles_train_test':
+
+            data_repo = process_params[process]['data_repo']
+            save_folder = process_params[process]['save_folder']
+            fig_folder = process_params[process]['fig_folder']
+            pre_processing_steps = process_params[process]['pre_processing_steps']
+            decode_onset = process_params[process]['decode_onset']
+            on_time_window = process_params[process]['on_time_window']
+            off_time_window = process_params[process]['off_time_window']
+            nasal_color = np.array([120, 173, 52]) / 255
+            temporal_color = np.array([179, 30, 129]) / 255
+
+            if decode_onset:
+
+                m_resp_ls, m_neun_ls, m_tr_ls, rec_name, m_resp_t_ls, m_aligned_time = load_data(
+                    os.path.join(data_repo, process_params[process]['eyeMovementSubFolder']), 'motor_w_time')
+                v_resp_ls, v_neun_ls, v_tr_ls, _, v_resp_t_ls, v_aligned_time_ls = load_data(
+                    os.path.join(data_repo, 'visualStim'), 'visual_w_time')
+
+                m_aligned_time = m_aligned_time.flatten()
+                # TODO: make this into a function
+                num_experiments = len(m_resp_ls)
+
+                m_resp_ls, v_resp_ls, m_tr_ls, v_tr_ls = \
+                    get_windowed_mean_activity(m_resp_t_ls, v_resp_t_ls, m_resp_ls, v_resp_ls, m_tr_ls, v_tr_ls,
+                                               m_aligned_time, v_aligned_time_ls, num_experiments, on_time_window,
+                                               off_time_window)
+
+                decode_onset_str = 'decode_onset_'
+
+            else:
+                m_resp_ls, m_neun_ls, m_tr_ls, rec_name = load_data(os.path.join(data_repo, 'eyeMovements'), 'motor')
+                v_resp_ls, v_neun_ls, v_tr_ls, _ = load_data(os.path.join(data_repo, 'visualStim'), 'visual')
+
+                decode_onset_str = ''
+
+            num_experiments = len(m_resp_ls)
+            print('Found %.f experiments' % num_experiments)
+
+
+            vis_vis_dprime_per_exp = []
+            mot_mot_dprime_per_exp = []
+            vis_mot_dprime_per_exp = []
+            mot_vis_dprime_per_exp = []
+
+            vis_vis_weight_cosine_sim_per_exp = []
+            mot_mot_weight_cosine_sim_per_exp = []
+            vis_mot_weight_cosine_sim_per_exp = []
+            mot_vis_weight_cosine_sim_per_exp = []
+
+            for recording_n in np.arange(0, len(rec_name)):
+                m_r = m_resp_ls[recording_n]
+                m_n = m_neun_ls[recording_n]
+                m_t = m_tr_ls[recording_n]
+                v_r = v_resp_ls[recording_n]
+                v_n = v_neun_ls[recording_n]
+                v_t = v_tr_ls[recording_n]
+                r_n = rec_name[recording_n]
+
+                motor_response, visual_response = subset_resp_and_other_resp(resp=m_r, resp_other_cond=v_r,
+                                                                             pre_processing_steps=pre_processing_steps,
+                                                                             verbose=True)
+
+                mot_response_trial_cond_a = motor_response[:, m_t == 0]
+
+                mot_response_trial_cond_b = motor_response[:, m_t == 1]
+
+                vis_response_trial_cond_a = visual_response[:, v_t == 0]
+                vis_response_trial_cond_b = visual_response[:, v_t == 1]
+
+                mot_response_trial_cond_a_mean = np.mean(mot_response_trial_cond_a, axis=1)
+                mot_response_trial_cond_b_mean = np.mean(mot_response_trial_cond_b, axis=1)
+
+                # mot_response_trial_cond_a_split_1 = mot_response_trial_cond_a[:, 0::2]
+                # mot_response_trial_cond_a_split_2 = mot_response_trial_cond_a[:, 1::2]
+
+                mot_cond_a_split_1_indices = np.where(m_t == 0)[0][0::2]
+                mot_cond_a_split_2_indices = np.where(m_t == 0)[0][1::2]
+                mot_cond_b_split_1_indices = np.where(m_t == 1)[0][0::2]
+                mot_cond_b_split_2_indices = np.where(m_t == 1)[0][1::2]
+
+                vis_cond_a_split_1_indices = np.where(v_t == 0)[0][0::2]
+                vis_cond_a_split_2_indices = np.where(v_t == 0)[0][1::2]
+                vis_cond_b_split_1_indices = np.where(v_t == 1)[0][0::2]
+                vis_cond_b_split_2_indices = np.where(v_t == 1)[0][1::2]
+
+                vis_response_trial_cond_a_split_1 = visual_response[:, vis_cond_a_split_1_indices]
+                vis_response_trial_cond_b_split_1 = visual_response[:, vis_cond_b_split_1_indices]
+                mot_response_trial_cond_a_split_1 = motor_response[:, mot_cond_a_split_1_indices]
+                mot_response_trial_cond_b_split_1 = motor_response[:, mot_cond_b_split_1_indices]
+
+                vis_response_trial_cond_a_split_2 = visual_response[:, vis_cond_a_split_2_indices]
+                vis_response_trial_cond_b_split_2 = visual_response[:, vis_cond_b_split_2_indices]
+                mot_response_trial_cond_a_split_2 = motor_response[:, mot_cond_a_split_2_indices]
+                mot_response_trial_cond_b_split_2 = motor_response[:, mot_cond_b_split_2_indices]
+
+
+                vis_split_1_indices = np.concatenate([vis_cond_a_split_1_indices, vis_cond_b_split_1_indices])
+                visual_response_split_1 = visual_response[:, vis_split_1_indices]
+                v_t_split_1 = v_t[vis_split_1_indices]
+
+                mot_split_1_indices = np.concatenate([mot_cond_a_split_1_indices, mot_cond_b_split_1_indices])
+                motor_response_split_1 = motor_response[:, mot_split_1_indices]
+                m_t_split_1 = m_t[mot_split_1_indices]
+
+                vis_split_2_indices = np.concatenate([vis_cond_a_split_2_indices, vis_cond_b_split_2_indices])
+                visual_response_split_2 = visual_response[:, vis_split_2_indices]
+                v_t_split_2 = v_t[vis_split_2_indices]
+
+                mot_split_2_indices = np.concatenate([mot_cond_a_split_2_indices, mot_cond_b_split_2_indices])
+                motor_response_split_2 = motor_response[:, mot_split_2_indices]
+                m_t_split_2 = m_t[mot_split_2_indices]
+
+
+                # Do LDA on first split
+                vis_lda_split_1 = LinearDiscriminantAnalysis(n_components=1)
+                mot_lda_split_1 = LinearDiscriminantAnalysis(n_components=1)
+                vis_lda_split_1.fit(visual_response_split_1.T, v_t_split_1)
+                mot_lda_split_1.fit(motor_response_split_1.T, m_t_split_1)
+
+                # Do LDA on second split
+                vis_lda_split_2 = LinearDiscriminantAnalysis(n_components=1)
+                mot_lda_split_2 = LinearDiscriminantAnalysis(n_components=1)
+                vis_lda_split_2.fit(visual_response_split_2.T, v_t_split_2)
+                mot_lda_split_2.fit(motor_response_split_2.T, m_t_split_2)
+
+
+                vis_lda_on_vis_a = vis_lda_split_1.transform(vis_response_trial_cond_a_split_1.T)
+                vis_lda_on_vis_b = vis_lda_split_1.transform(vis_response_trial_cond_b_split_1.T)
+                mot_lda_on_vis_a = mot_lda_split_1.transform(vis_response_trial_cond_a_split_1.T)
+                mot_lda_on_vis_b = mot_lda_split_1.transform(vis_response_trial_cond_b_split_1.T)
+
+                vis_lda_on_mot_a = vis_lda_split_1.transform(mot_response_trial_cond_a_split_1.T)
+                vis_lda_on_mot_b = vis_lda_split_1.transform(mot_response_trial_cond_b_split_1.T)
+                mot_lda_on_mot_a = mot_lda_split_1.transform(mot_response_trial_cond_a_split_1.T)
+                mot_lda_on_mot_b = mot_lda_split_1.transform(mot_response_trial_cond_b_split_1.T)
+
+
+                # Get the cross-validated LDA splits and dprime : VIS -> VIS
+                vis_lda_on_vis_a_train_1_test_2 = vis_lda_split_1.transform(vis_response_trial_cond_a_split_2.T)
+                vis_lda_on_vis_b_train_1_test_2 = vis_lda_split_1.transform(vis_response_trial_cond_b_split_2.T)
+                vis_lda_on_vis_a_train_2_test_1 = vis_lda_split_2.transform(vis_response_trial_cond_a_split_1.T)
+                vis_lda_on_vis_b_train_2_test_1 = vis_lda_split_2.transform(vis_response_trial_cond_b_split_1.T)
+
+                vis_train_1_test_2_dprime = get_dprime(samples_1=vis_lda_on_vis_a_train_1_test_2, samples_2=vis_lda_on_vis_b_train_1_test_2)
+                vis_train_2_test_1_dprime = get_dprime(samples_1=vis_lda_on_vis_a_train_2_test_1, samples_2=vis_lda_on_vis_b_train_2_test_1)
+
+                # Get the cross-validated LDA splits and dprime : MOT -> MOT
+                mot_lda_on_mot_a_train_1_test_2 = mot_lda_split_1.transform(mot_response_trial_cond_a_split_2.T)
+                mot_lda_on_mot_b_train_1_test_2 = mot_lda_split_1.transform(mot_response_trial_cond_b_split_2.T)
+                mot_lda_on_mot_a_train_2_test_1 = mot_lda_split_2.transform(mot_response_trial_cond_a_split_1.T)
+                mot_lda_on_mot_b_train_2_test_1 = mot_lda_split_2.transform(mot_response_trial_cond_b_split_1.T)
+
+                mot_train_1_test_2_dprime = get_dprime(samples_1=mot_lda_on_mot_a_train_1_test_2,
+                                                       samples_2=mot_lda_on_mot_b_train_1_test_2)
+                mot_train_2_test_1_dprime = get_dprime(samples_1=mot_lda_on_mot_a_train_2_test_1,
+                                                       samples_2=mot_lda_on_mot_b_train_2_test_1)
+
+                # Get the cross-validated LDA splits and dprime : VIS -> MOT
+                vis_lda_on_mot_a_train_1_test_2 = vis_lda_split_1.transform(mot_response_trial_cond_a_split_2.T)
+                vis_lda_on_mot_b_train_1_test_2 = vis_lda_split_1.transform(mot_response_trial_cond_b_split_2.T)
+                vis_lda_on_mot_a_train_2_test_1 = vis_lda_split_2.transform(mot_response_trial_cond_a_split_1.T)
+                vis_lda_on_mot_b_train_2_test_1 = vis_lda_split_2.transform(mot_response_trial_cond_b_split_1.T)
+
+                vis_lda_mot_train_1_test_2_dprime = get_dprime(samples_1=vis_lda_on_mot_a_train_1_test_2,
+                                                       samples_2=vis_lda_on_mot_b_train_1_test_2)
+                vis_lda_mot_train_2_test_1_dprime = get_dprime(samples_1=vis_lda_on_mot_a_train_2_test_1,
+                                                       samples_2=vis_lda_on_mot_b_train_2_test_1)
+
+                # Get the cross-validated LDA splits and dprime : MOT -> VIS
+                mot_lda_on_vis_a_train_1_test_2 = mot_lda_split_1.transform(vis_response_trial_cond_a_split_2.T)
+                mot_lda_on_vis_b_train_1_test_2 = mot_lda_split_1.transform(vis_response_trial_cond_b_split_2.T)
+                mot_lda_on_vis_a_train_2_test_1 = mot_lda_split_2.transform(vis_response_trial_cond_a_split_1.T)
+                mot_lda_on_vis_b_train_2_test_1 = mot_lda_split_2.transform(vis_response_trial_cond_b_split_1.T)
+
+                mot_lda_vis_train_1_test_2_dprime = get_dprime(samples_1=mot_lda_on_vis_a_train_1_test_2,
+                                                               samples_2=mot_lda_on_vis_b_train_1_test_2)
+                mot_lda_vis_train_2_test_1_dprime = get_dprime(samples_1=mot_lda_on_vis_a_train_2_test_1,
+                                                               samples_2=mot_lda_on_vis_b_train_2_test_1)
+
+                vis_vis_dprime_per_exp.append(np.mean([vis_train_1_test_2_dprime, vis_train_2_test_1_dprime]))
+                mot_mot_dprime_per_exp.append(np.mean([mot_train_1_test_2_dprime, mot_train_2_test_1_dprime]))
+                vis_mot_dprime_per_exp.append(np.mean([vis_lda_mot_train_1_test_2_dprime, vis_lda_mot_train_2_test_1_dprime]))
+                mot_vis_dprime_per_exp.append(np.mean([mot_lda_vis_train_1_test_2_dprime, mot_lda_vis_train_2_test_1_dprime]))
+
+
+                # Calculate the cosine angle of the LDA weights
+                vis_vis_weight_cosine_sim = np.dot(vis_lda_split_1.coef_.flatten(), vis_lda_split_2.coef_.flatten()) / \
+                                            (np.linalg.norm(vis_lda_split_1.coef_) * np.linalg.norm(vis_lda_split_2.coef_))
+
+                mot_mot_weight_cosine_sim = np.dot(mot_lda_split_1.coef_.flatten(), mot_lda_split_2.coef_.flatten()) / \
+                                            (np.linalg.norm(mot_lda_split_1.coef_) * np.linalg.norm(
+                                                mot_lda_split_2.coef_))
+
+                vis_mot_weight_cosine_sim = np.dot(vis_lda_split_1.coef_.flatten(), mot_lda_split_2.coef_.flatten()) / \
+                                            (np.linalg.norm(vis_lda_split_1.coef_) * np.linalg.norm(
+                                                mot_lda_split_2.coef_))
+
+                mot_vis_weight_cosine_sim = np.dot(mot_lda_split_1.coef_.flatten(), vis_lda_split_2.coef_.flatten()) / \
+                                            (np.linalg.norm(mot_lda_split_1.coef_) * np.linalg.norm(
+                                                vis_lda_split_2.coef_))
+
+                vis_vis_weight_cosine_sim_per_exp.append(vis_vis_weight_cosine_sim)
+                mot_mot_weight_cosine_sim_per_exp.append(mot_mot_weight_cosine_sim)
+                vis_mot_weight_cosine_sim_per_exp.append(vis_mot_weight_cosine_sim)
+                mot_vis_weight_cosine_sim_per_exp.append(mot_vis_weight_cosine_sim)
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig, axs = plt.subplots(2, 4, sharex=True, sharey=True)
+                    fig.set_size_inches(8, 4)
+
+                    title_txt_size = 11
+                    margin_y_val = 0.1
+
+                    # Vis classifcation
+                    axs[0, 0].scatter(vis_lda_on_vis_a_train_1_test_2, np.repeat(margin_y_val, len(vis_lda_on_vis_a_train_1_test_2)),
+                                      color=nasal_color)
+                    axs[0, 0].scatter(vis_lda_on_vis_b_train_1_test_2, np.repeat(margin_y_val, len(vis_lda_on_vis_b_train_1_test_2)),
+                                      color=temporal_color)
+
+                    axs[0, 0].set_title('dprime = %.2f' % vis_train_1_test_2_dprime, size=title_txt_size)
+
+                    axs[1, 0].scatter(vis_lda_on_vis_a_train_2_test_1,
+                                      np.repeat(margin_y_val, len(vis_lda_on_vis_a_train_2_test_1)),
+                                      color=nasal_color)
+                    axs[1, 0].scatter(vis_lda_on_vis_b_train_2_test_1,
+                                      np.repeat(margin_y_val, len(vis_lda_on_vis_b_train_2_test_1)),
+                                      color=temporal_color)
+
+                    axs[1, 0].set_title('dprime = %.2f' % vis_train_2_test_1_dprime, size=title_txt_size)
+
+
+                    # Mot classification
+                    axs[0, 1].scatter(mot_lda_on_mot_a_train_1_test_2,
+                                      np.repeat(margin_y_val, len(mot_lda_on_mot_a_train_1_test_2)),
+                                      color=nasal_color)
+                    axs[0, 1].scatter(mot_lda_on_mot_b_train_1_test_2,
+                                      np.repeat(margin_y_val, len(mot_lda_on_mot_b_train_1_test_2)),
+                                      color=temporal_color)
+
+                    axs[0, 1].set_title('dprime = %.2f' % mot_train_1_test_2_dprime, size=title_txt_size)
+
+                    axs[1, 1].scatter(mot_lda_on_mot_a_train_2_test_1,
+                                      np.repeat(margin_y_val, len(mot_lda_on_mot_a_train_2_test_1)),
+                                      color=nasal_color)
+                    axs[1, 1].scatter(mot_lda_on_mot_b_train_2_test_1,
+                                      np.repeat(margin_y_val, len(mot_lda_on_mot_b_train_2_test_1)),
+                                      color=temporal_color)
+
+                    axs[1, 1].set_title('dprime = %.2f' % mot_train_2_test_1_dprime, size=title_txt_size)
+
+                    # VIS -> MOT classification
+                    axs[0, 2].scatter(vis_lda_on_mot_a_train_1_test_2,
+                                      np.repeat(margin_y_val, len(vis_lda_on_mot_a_train_1_test_2)),
+                                      color=nasal_color)
+                    axs[0, 2].scatter(vis_lda_on_mot_b_train_1_test_2,
+                                      np.repeat(margin_y_val, len(vis_lda_on_mot_b_train_1_test_2)),
+                                      color=temporal_color)
+
+                    axs[0, 2].set_title('dprime = %.2f' % vis_lda_mot_train_1_test_2_dprime, size=title_txt_size)
+
+                    axs[1, 2].scatter(vis_lda_on_mot_a_train_2_test_1,
+                                      np.repeat(margin_y_val, len(vis_lda_on_mot_a_train_2_test_1)),
+                                      color=nasal_color)
+                    axs[1, 2].scatter(vis_lda_on_mot_b_train_2_test_1,
+                                      np.repeat(margin_y_val, len(vis_lda_on_mot_b_train_2_test_1)),
+                                      color=temporal_color)
+
+                    axs[1, 2].set_title('dprime = %.2f' % vis_lda_mot_train_2_test_1_dprime, size=title_txt_size)
+
+
+                    # MOT -> VIS classification
+                    axs[0, 3].scatter(mot_lda_on_vis_a_train_1_test_2,
+                                      np.repeat(margin_y_val, len(mot_lda_on_vis_a_train_1_test_2)),
+                                      color=nasal_color)
+                    axs[0, 3].scatter(mot_lda_on_vis_b_train_1_test_2,
+                                      np.repeat(margin_y_val, len(mot_lda_on_vis_b_train_1_test_2)),
+                                      color=temporal_color)
+
+                    axs[0, 3].set_title('dprime = %.2f' % mot_lda_vis_train_1_test_2_dprime, size=title_txt_size)
+
+                    axs[1, 3].scatter(mot_lda_on_vis_a_train_2_test_1,
+                                      np.repeat(margin_y_val, len(mot_lda_on_vis_a_train_2_test_1)),
+                                      color=nasal_color)
+                    axs[1, 3].scatter(mot_lda_on_vis_b_train_2_test_1,
+                                      np.repeat(margin_y_val, len(mot_lda_on_vis_b_train_2_test_1)),
+                                      color=temporal_color)
+
+                    axs[1, 3].set_title('dprime = %.2f' % mot_lda_vis_train_2_test_1_dprime, size=title_txt_size)
+
+                fig_name = '%s_cvLDA' % rec_name[recording_n]
+                fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+
+
+                with plt.style.context(splstyle.get_style('nature-reviews')):
+                    fig = plt.figure(figsize=(8, 8))
+                    gs = fig.add_gridspec(2, 2, width_ratios=(7, 2), height_ratios=(2, 7),
+                                          left=0.1, right=0.9, bottom=0.1, top=0.9,
+                                          wspace=0.05, hspace=0.05)
+
+                    ax = fig.add_subplot(gs[1, 0])
+                    ax_histx = fig.add_subplot(gs[0, 0], sharex=ax)
+                    ax_histy = fig.add_subplot(gs[1, 1], sharey=ax)
+
+                    nasal_color = np.array([120, 173, 52]) / 255
+                    temporal_color = np.array([179, 30, 129]) / 255
+
+                    vis_nasal = ax.scatter(vis_lda_on_vis_a, mot_lda_on_vis_a, color=nasal_color, label='Vis nasal')
+                    vis_temporal = ax.scatter(vis_lda_on_vis_b, mot_lda_on_vis_b, color=temporal_color,
+                                              label='Vis temporal')
+                    # Draw the separating line
+
+
+                    # ax.scatter(vis_lda_on_mot_a, mot_lda_on_mot_a, color='blue', marker='x')
+                    # ax.scatter(vis_lda_on_mot_b, mot_lda_on_mot_b, color='red', marker='x')
+
+                    mot_nasal = ax.scatter(vis_lda_on_mot_a, mot_lda_on_mot_a, facecolor='none', edgecolor=nasal_color,
+                                           linestyle=':', label='Mot nasal')
+                    mot_temporal = ax.scatter(vis_lda_on_mot_b, mot_lda_on_mot_b, facecolor='none',
+                                              edgecolor=temporal_color, linestyle=':', label='Mot temporal')
+
+                    ax.set_xlabel('Vis LDA axis', size=11)
+                    ax.set_ylabel('Mot LDA axis', size=11)
+
+                    ax.set_xticks([-4, 0, 4])
+                    ax.set_yticks([-4, 0, 4])
+
+                    # 1 : temporal grating
+                    # 0 : nasal grating
+
+                    # Legend
+                    # legend_elements = [mpl.lines.Line2D([0], [0], marker='o', color='blue', label='Vis nasal', lw=0,
+                    #                           markerfacecolor='blue', markersize=15),
+                    #                    mpl.lines.Line2D([0], [0], marker='o', color='red', label='Vis temporal', lw=0,
+                    #                           markerfacecolor='red', markersize=15),
+                    #                    mpl.lines.Line2D([0], [0], marker=r'$\u25CC$', color='blue', label='Mot nasal', lw=0,
+                    #                                     markerfacecolor='none', linestyle=':',
+                    #                                     markersize=15)
+                    #                    mpl.lines.Line2D([0], [0], marker=r'$\u25CC$',  color='red', label='Mot temporal', lw=0,
+                    #                           markerfacecolor='none', markeredgecolor='blue', markersize=15)]
+
+                    ax.legend(bbox_to_anchor=(0.7, 0.2))
+
+                    mot_linestyle = ':'
+
+                    # Kernel Density Estimate of the marginals : visual dimension
+                    vis_lda_points_to_sample = np.linspace(-4, 4, 100)
+
+                    vis_lda_on_vis_a_kde = sstats.gaussian_kde(vis_lda_on_vis_a.flatten())
+                    vis_lda_on_vis_a_curve = vis_lda_on_vis_a_kde(vis_lda_points_to_sample)
+                    ax_histx.plot(vis_lda_points_to_sample, vis_lda_on_vis_a_curve, color=nasal_color)
+
+                    vis_lda_on_vis_b_kde = sstats.gaussian_kde(vis_lda_on_vis_b.flatten())
+                    vis_lda_on_vis_b_curve = vis_lda_on_vis_b_kde(vis_lda_points_to_sample)
+                    ax_histx.plot(vis_lda_points_to_sample, vis_lda_on_vis_b_curve, color=temporal_color)
+
+                    vis_lda_on_mot_a_kde = sstats.gaussian_kde(vis_lda_on_mot_a.flatten())
+                    vis_lda_on_mot_a_curve = vis_lda_on_mot_a_kde(vis_lda_points_to_sample)
+                    ax_histx.plot(vis_lda_points_to_sample, vis_lda_on_mot_a_curve, color=nasal_color,
+                                  linestyle=mot_linestyle)
+
+                    vis_lda_on_mot_b_kde = sstats.gaussian_kde(vis_lda_on_mot_b.flatten())
+                    vis_lda_on_mot_b_curve = vis_lda_on_mot_b_kde(vis_lda_points_to_sample)
+                    ax_histx.plot(vis_lda_points_to_sample, vis_lda_on_mot_b_curve, color='red',
+                                  linestyle=mot_linestyle)
+
+                    margin_pos_vis = -0.1
+                    margin_pos_mot = -0.2
+                    marker_alpha = 1
+                    ax_histx.scatter(vis_lda_on_vis_a, np.repeat(margin_pos_vis, len(vis_lda_on_vis_a)),
+                                     color=nasal_color, alpha=marker_alpha)
+                    ax_histx.scatter(vis_lda_on_vis_b, np.repeat(margin_pos_vis, len(vis_lda_on_vis_b)),
+                                     color=temporal_color, alpha=marker_alpha)
+                    # ax_histx.scatter(vis_lda_on_mot_a, np.repeat(margin_pos_mot, len(vis_lda_on_mot_a)), color='blue', marker='x', alpha=marker_alpha)
+                    # ax_histx.scatter(vis_lda_on_mot_b, np.repeat(margin_pos_mot, len(vis_lda_on_mot_b)), color='red', marker='x', alpha=marker_alpha)
+
+                    ax_histx.scatter(vis_lda_on_mot_a, np.repeat(margin_pos_mot, len(vis_lda_on_mot_a)),
+                                     facecolor='none', edgecolor=nasal_color, linestyle=':', alpha=marker_alpha)
+                    ax_histx.scatter(vis_lda_on_mot_b, np.repeat(margin_pos_mot, len(vis_lda_on_mot_b)),
+                                     facecolor='none', edgecolor=temporal_color, linestyle=':', alpha=marker_alpha)
+
+                    ax_histx.tick_params(labelbottom=False, length=0)
+                    ax_histx.spines['bottom'].set_visible(False)
+
+                    ax_histx.set_yticks([])
+                    ax_histx.spines['left'].set_visible(False)
+
+                    # Kernel Density Estimate of the marginals : motor dimension
+                    mot_lda_points_to_sample = np.linspace(-4, 4, 100)
+
+                    mot_lda_on_vis_a_kde = sstats.gaussian_kde(mot_lda_on_vis_a.flatten())
+                    mot_lda_on_vis_a_curve = mot_lda_on_vis_a_kde(mot_lda_points_to_sample)
+                    ax_histy.plot(mot_lda_on_vis_a_curve, mot_lda_points_to_sample, color=nasal_color)
+
+                    mot_lda_on_vis_b_kde = sstats.gaussian_kde(mot_lda_on_vis_b.flatten())
+                    mot_lda_on_vis_b_curve = mot_lda_on_vis_b_kde(mot_lda_points_to_sample)
+                    ax_histy.plot(mot_lda_on_vis_b_curve, mot_lda_points_to_sample, color=temporal_color)
+
+                    mot_lda_on_mot_a_kde = sstats.gaussian_kde(mot_lda_on_mot_a.flatten())
+                    mot_lda_on_mot_a_curve = mot_lda_on_mot_a_kde(mot_lda_points_to_sample)
+                    ax_histy.plot(mot_lda_on_mot_a_curve, mot_lda_points_to_sample, color=nasal_color,
+                                  linestyle=mot_linestyle)
+
+                    mot_lda_on_mot_b_kde = sstats.gaussian_kde(mot_lda_on_mot_b.flatten())
+                    mot_lda_on_mot_b_curve = mot_lda_on_mot_b_kde(mot_lda_points_to_sample)
+                    ax_histy.plot(mot_lda_on_mot_b_curve, mot_lda_points_to_sample, color=temporal_color,
+                                  linestyle=mot_linestyle)
+
+                    ax_histy.scatter(np.repeat(margin_pos_vis, len(mot_lda_on_vis_a)), mot_lda_on_vis_a,
+                                     color=nasal_color, alpha=marker_alpha)
+                    ax_histy.scatter(np.repeat(margin_pos_vis, len(mot_lda_on_vis_b)), mot_lda_on_vis_b,
+                                     color=temporal_color, alpha=marker_alpha)
+
+                    # ax_histy.scatter(np.repeat(margin_pos_mot, len(mot_lda_on_mot_a)), mot_lda_on_mot_a, color='blue', marker='x', alpha=marker_alpha)
+                    # ax_histy.scatter(np.repeat(margin_pos_mot, len(mot_lda_on_mot_b)), mot_lda_on_mot_b, color='red', marker='x', alpha=marker_alpha)
+                    ax_histy.scatter(np.repeat(margin_pos_mot, len(mot_lda_on_mot_a)), mot_lda_on_mot_a,
+                                     facecolor='none', edgecolor=nasal_color, linestyle=':', alpha=marker_alpha)
+                    ax_histy.scatter(np.repeat(margin_pos_mot, len(mot_lda_on_mot_b)), mot_lda_on_mot_b,
+                                     facecolor='none', edgecolor=temporal_color, linestyle=':', alpha=marker_alpha)
+
+                    ax_histy.tick_params(labelleft=False, length=0)
+                    ax_histy.spines['left'].set_visible(False)
+
+                    ax_histy.set_xticks([])
+                    ax_histy.spines['bottom'].set_visible(False)
+
+                fig_name = '%s_LDA' % rec_name[recording_n]
+                fig_ext = '.svg'
+
+                # save font as text rather than paths
+                plt.rcParams['svg.fonttype'] = 'none'
+
+                fig.savefig(os.path.join(fig_folder, fig_name + fig_ext), dpi=300, bbox_inches='tight')
+
+
+
+            # Summarise the dprime for each experiment
+
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, ax = plt.subplots()
+                fig.set_size_inches(5, 4)
+                all_dprime = np.stack([mot_mot_dprime_per_exp, vis_vis_dprime_per_exp,
+                                       mot_vis_dprime_per_exp, vis_mot_dprime_per_exp])
+
+                for n_exp in np.arange(0, len(rec_name)):
+                    ax.plot(all_dprime[:, n_exp])
+
+
+                ax.set_ylabel('Absolute dprime value', size=11)
+                ax.set_xticks([0, 1, 2, 3])
+                ax.set_xticklabels([r'Mot $\rightarrow$ Mot', r'Vis $\rightarrow$ Vis',
+                                    r'Mot $\rightarrow$ Vis', r'Vis $\rightarrow$ Mot'])
+
+            fig_name = 'all_exp_dprime_values'
+            fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+
+
+            # Summarise the vis mot weights
+            with plt.style.context(splstyle.get_style('nature-reviews')):
+                fig, ax = plt.subplots()
+                fig.set_size_inches(4, 4)
+                all_weight_cosine_sim = np.stack([mot_mot_weight_cosine_sim_per_exp, vis_vis_weight_cosine_sim_per_exp,
+                                       mot_vis_weight_cosine_sim_per_exp, vis_mot_weight_cosine_sim_per_exp])
+
+                for n_exp in np.arange(0, len(rec_name)):
+                    ax.plot(all_weight_cosine_sim[:, n_exp], color='gray')
+
+
+                ax.set_ylabel('Weight cosine similarity', size=11)
+                ax.set_xticks([0, 1, 2, 3])
+                ax.set_xticklabels([r'Mot $\rightarrow$ Mot', r'Vis $\rightarrow$ Vis',
+                                    r'Mot $\rightarrow$ Vis', r'Vis $\rightarrow$ Mot'])
+
+            fig_name = 'all_exp_LDA_weight_cosine_similarity_values'
+
+            for ext in process_params[process]['fig_exts']:
+                fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
 
 
 if __name__ == '__main__':
