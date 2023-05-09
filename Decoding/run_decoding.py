@@ -443,7 +443,7 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
                                             'remove_zero_variance_neurons', 'only_include_sig_neurons'],
                     include_shuffles=True,
                     num_shuffles=100, decode_onset=False, onset_baseline_time_window=[-0.15, -0.05],
-                    resp_w_t_2=None, tr_2=None,
+                    resp_w_t_2=None, tr_2=None, aligned_time_2=None,
                     verbose=False):
     """
     Do decoding for each time window (by taking the mean activity over the time window)
@@ -487,6 +487,9 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
     accuracy_per_window = np.zeros((tot_n_window, n_cv_folds)) + np.nan
     shuffled_accuracy_per_window = np.zeros((tot_n_window, num_shuffles))
 
+    if resp_w_t_2 is not None:
+        accuracy_per_window_2 = np.zeros((tot_n_window, n_cv_folds)) + np.nan
+
     if decode_onset:
         onset_baseline_index = np.where(
             (aligned_time >= onset_baseline_time_window[0]) &
@@ -507,6 +510,14 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
 
         resp_at_time_window = np.mean(resp_w_t[subset_time_idx, :, :], axis=0).T  # neuron x trial
 
+        if resp_w_t_2 is not None:
+
+            subset_time_idx_2 = np.where(
+                (aligned_time_2 >= window_start) & (aligned_time_2 <= window_end))[0]
+
+            resp_2_at_time_window = np.mean(resp_w_t_2[subset_time_idx_2, :, :], axis=0).T  # neuron x trial
+            resp_2 = resp_2_at_time_window  # currently assumes decode_onset is not used
+
         if decode_onset:
             resp = np.concatenate([resp_at_time_window, onset_baseline_activity], axis=1)  # neuron x (on trial + "off" trials)
             trial_type = np.repeat([1, 0], np.shape(resp_at_time_window)[1])  # 1 : on, 0 : off
@@ -522,6 +533,22 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
                           include_shuffles=include_shuffles, num_shuffles=num_shuffles,
                           plot_checks=False, verbose=verbose, fit_estimator=True, fig_folder=None)
 
+        if resp_w_t_2 is not None:
+            # a_cv_results, a_weights_per_cv, _ = decode_trial_type(resp=response_a, neun=neurons_a, tr=trials_a,
+            #                                                       resp_other_cond=response_b,
+            #                                                       pre_processing_steps=pre_processing_steps)
+            train_a_test_b_accuracy = []
+            for estimator in cv_results_at_t['estimator']:
+                b_cv_results_at_t, b_weights_per_cv_at_t, _ = decode_trial_type(resp=resp_2, neun=neun, tr=tr_2,
+                                                                      estimator=estimator, fit_estimator=False,
+                                                                      resp_other_cond=resp, cv_splitter=cv_splitter,
+                                                                      pre_processing_steps=pre_processing_steps)
+                train_a_test_b_accuracy.append(b_cv_results_at_t['accuracy'])
+
+            # TODO: take the average across the estimator...
+            accuracy_per_window_2[n_window] = np.mean(train_a_test_b_accuracy)
+
+
         accuracy_per_window[n_window, :] = cv_results_at_t['test_score']
         shuffled_accuracy_per_window[n_window, :] = accuracy_per_shuffle_at_t
 
@@ -529,6 +556,9 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
     windowed_decoding_results['shuffled_accuracy_per_window'] = shuffled_accuracy_per_window
     windowed_decoding_results['window_starts'] = decoding_window_bins[0:-1]
     windowed_decoding_results['window_ends'] = decoding_window_bins[1:]
+
+    if resp_w_t_2 is not None:
+        windowed_decoding_results['accuracy_per_window_2'] = accuracy_per_window_2
 
     if decode_onset:
         windowed_decoding_results['decoding_type'] = 'onset'
@@ -1856,6 +1886,7 @@ def main():
                                   'remove_zero_variance_neurons'],
             decoding_window_width=0.1,
             decode_onset=False,
+            include_v_m_and_m_v_model=True,
         ),
         'plot_windowed_decoding': dict(
             data_repo='/Users/timothysit/neurCorrEyeMove/decodingData/',
@@ -1888,7 +1919,7 @@ def main():
         'cal_trial_angles_train_test': dict(
             data_repo='/Users/timothysit/neurCorrEyeMove/decodingData/',
             save_folder='/Users/timothysit/neurCorrEyeMove/decodingResults',
-            fig_folder='/Users/timothysit/neurCorrEyeMove/figures',
+            fig_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Figures/decoding',
             eyeMovementSubFolder='eyeMovementsLong',
             decode_onset=False,
             on_time_window=[0.05, 0.15],
@@ -2857,6 +2888,7 @@ def main():
             v_resp_ls, v_neun_ls, v_tr_ls, v_rec_name, v_resp_t_ls, v_aligned_time_ls = load_data(
                 os.path.join(data_repo, 'visualStim'), 'visual_w_time')
 
+
             verbose = True
 
             for n_recording in np.arange(len(m_rec_name)):
@@ -2873,6 +2905,9 @@ def main():
                 v_neun = v_neun_ls[n_recording].flatten()
                 m_neun = m_neun_ls[n_recording].flatten()
 
+                fixed_decoding_bins = np.arange(-2, 2.01, 0.1)
+
+                """
                 v_windowed_decoding_results = window_decoding(resp_w_t=v_resp_w_time,
                                                    neun=v_neun, tr=v_trial_types, aligned_time=v_aligned_time,
                                                    verbose=verbose, decode_onset=decode_onset,
@@ -2881,6 +2916,21 @@ def main():
                                                    neun=m_neun, tr=m_trial_types, aligned_time=m_aligned_time,
                                                    verbose=verbose, decode_onset=decode_onset,
                                                    pre_processing_steps=pre_processing_steps)
+                """
+
+                # Make custom decoding window bins from -2 to 2 seconds aligned
+
+
+                v_m_windowed_decoding_results = window_decoding(resp_w_t=v_resp_w_time,
+                                                   neun=v_neun, tr=v_trial_types,
+                                                   resp_w_t_2=m_resp_w_time,
+                                                   tr_2=m_trial_types,
+                                                   aligned_time=v_aligned_time,
+                                                   aligned_time_2=m_aligned_time,
+                                                   verbose=verbose, decode_onset=decode_onset,
+                                                   pre_processing_steps=pre_processing_steps)
+
+                pdb.set_trace()
 
                 if decode_onset:
                     v_save_path = os.path.join(save_folder, '%s_v_windowed_decoding_onset_results.npz' % rec_name)
@@ -3621,12 +3671,48 @@ def main():
 
             with plt.style.context(splstyle.get_style('nature-reviews')):
                 fig, ax = plt.subplots()
-                fig.set_size_inches(5, 4)
+                fig.set_size_inches(4, 4)
                 all_dprime = np.stack([mot_mot_dprime_per_exp, vis_vis_dprime_per_exp,
                                        mot_vis_dprime_per_exp, vis_mot_dprime_per_exp])
 
                 for n_exp in np.arange(0, len(rec_name)):
-                    ax.plot(all_dprime[:, n_exp])
+                    ax.plot(all_dprime[:, n_exp], color='gray')
+
+
+                # Do the stats on the dprime
+                _, vis_vis_vs_mot_vis_pval = sstats.wilcoxon(vis_vis_dprime_per_exp, mot_vis_dprime_per_exp)
+                vis_vis_vs_mot_vis_pval_str = '$p = %.4f$' % vis_vis_vs_mot_vis_pval
+
+                _, vis_vis_vs_vis_mot_pval = sstats.wilcoxon(vis_vis_dprime_per_exp, vis_mot_dprime_per_exp)
+                vis_vis_vs_vis_mot_pval_str = '$p = %.4f$' % vis_vis_vs_vis_mot_pval
+
+                _, mot_mot_vs_mot_vis_pval = sstats.wilcoxon(mot_mot_dprime_per_exp, mot_vis_dprime_per_exp)
+                mot_mot_vs_mot_vis_pval_str = '$p = %.4f$' % mot_mot_vs_mot_vis_pval
+
+                _, mot_mot_vs_vis_mot_pval = sstats.wilcoxon(mot_mot_dprime_per_exp, vis_mot_dprime_per_exp)
+                mot_mot_vs_vis_mot_pval_str = '$p = %.4f$' % mot_mot_vs_vis_mot_pval
+
+                x_start_list = [0, 0,
+                                1, 1]
+                x_end_list = [2, 3,
+                              2, 3]
+
+                y_start_list = np.array([7, 7.5,
+                                6, 6.5])
+                y_end_list = np.array([7, 7,
+                              5.5, 5.5])
+
+                stat_list = [mot_mot_vs_mot_vis_pval_str, mot_mot_vs_vis_mot_pval_str,
+                             vis_vis_vs_mot_vis_pval_str, vis_vis_vs_vis_mot_pval_str]
+                # stat_list = np.array(stat_list)[decoder_ordering_idx]
+
+                line_height = 0.2
+                text_y_offset = 0.1
+                fig, ax = spltext.add_stat_annot(fig, ax, x_start_list=x_start_list, x_end_list=x_end_list,
+                                                 y_start_list=y_start_list, y_end_list=y_end_list,
+                                                 line_height=line_height,
+                                                 stat_list=stat_list, text_y_offset=text_y_offset, text_x_offset=-0.01)
+
 
 
                 ax.set_ylabel('Absolute dprime value', size=11)
@@ -3635,7 +3721,8 @@ def main():
                                     r'Mot $\rightarrow$ Vis', r'Vis $\rightarrow$ Mot'])
 
             fig_name = 'all_exp_dprime_values'
-            fig.savefig(os.path.join(fig_folder, fig_name), dpi=300, bbox_inches='tight')
+            for ext in process_params[process]['fig_exts']:
+                fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
 
 
             # Summarise the vis mot weights
@@ -3647,6 +3734,40 @@ def main():
 
                 for n_exp in np.arange(0, len(rec_name)):
                     ax.plot(all_weight_cosine_sim[:, n_exp], color='gray')
+
+
+                # Do the stats on the cosine similarities
+                _, vis_vis_vs_mot_vis_pval = sstats.wilcoxon(vis_vis_weight_cosine_sim_per_exp, mot_vis_weight_cosine_sim_per_exp)
+                vis_vis_vs_mot_vis_pval_str = '$p = %.4f$' % vis_vis_vs_mot_vis_pval
+
+                _, vis_vis_vs_vis_mot_pval = sstats.wilcoxon(vis_vis_weight_cosine_sim_per_exp, vis_mot_weight_cosine_sim_per_exp)
+                vis_vis_vs_vis_mot_pval_str = '$p = %.4f$' % vis_vis_vs_vis_mot_pval
+
+                _, mot_mot_vs_mot_vis_pval = sstats.wilcoxon(mot_mot_weight_cosine_sim_per_exp, mot_vis_weight_cosine_sim_per_exp)
+                mot_mot_vs_mot_vis_pval_str = '$p = %.4f$' % mot_mot_vs_mot_vis_pval
+
+                _, mot_mot_vs_vis_mot_pval = sstats.wilcoxon(mot_mot_weight_cosine_sim_per_exp, vis_mot_weight_cosine_sim_per_exp)
+                mot_mot_vs_vis_mot_pval_str = '$p = %.4f$' % mot_mot_vs_vis_mot_pval
+
+                x_start_list = [0, 0,
+                                1, 1]
+                x_end_list = [2, 3,
+                              2, 3]
+                y_start_list = np.array([1.25, 1.35,
+                                1.0, 1.1]) - 0.5
+                y_end_list = np.array([1.25, 1.25,
+                              0.8, 0.85]) - 0.5
+
+                stat_list = [mot_mot_vs_mot_vis_pval_str, mot_mot_vs_vis_mot_pval_str,
+                             vis_vis_vs_mot_vis_pval_str, vis_vis_vs_vis_mot_pval_str]
+                # stat_list = np.array(stat_list)[decoder_ordering_idx]
+
+                line_height = 0.05
+                text_y_offset = 0.025
+                fig, ax = spltext.add_stat_annot(fig, ax, x_start_list=x_start_list, x_end_list=x_end_list,
+                                                 y_start_list=y_start_list, y_end_list=y_end_list,
+                                                 line_height=line_height,
+                                                 stat_list=stat_list, text_y_offset=text_y_offset, text_x_offset=-0.01)
 
 
                 ax.set_ylabel('Weight cosine similarity', size=11)
