@@ -293,6 +293,7 @@ def decode_trial_type(resp, neun, tr, estimator=None, cv_splitter=None,
     # if num_zero_var_neuron > 0:
     #   pdb.set_trace()
 
+
     if 'exclude_nan_response' in pre_processing_steps:
         resp_mean = np.nanmean(resp, axis=1)  # take the mean response of each neuron across trials (excluding nan)
         subset_neuron_bool = ~np.isnan(resp_mean)
@@ -336,6 +337,9 @@ def decode_trial_type(resp, neun, tr, estimator=None, cv_splitter=None,
         resp = resp[subset_neuron_bool, :]
 
     # if 'remove_zero_variance_neurons_two_conditions' in pre_processing_steps:
+    #     pdb.set_trace()
+
+    # if resp_other_cond is not None:
     #     pdb.set_trace()
 
     X = resp.T  # reshape to (num_trial, num_neurons)
@@ -526,27 +530,45 @@ def window_decoding(resp_w_t, neun, tr, aligned_time, decoding_window_width=0.1,
             resp = resp_at_time_window
             trial_type = tr
 
-        cv_results_at_t, weights_at_t, accuracy_per_shuffle_at_t = decode_trial_type(resp=resp, neun=neun, tr=trial_type,
+        if resp_w_t_2 is None:
+            cv_results_at_t, weights_at_t, accuracy_per_shuffle_at_t = decode_trial_type(resp=resp, neun=neun, tr=trial_type,
                           estimator=None, cv_splitter=cv_splitter,
                           pre_processing_steps=pre_processing_steps,
                           resp_other_cond=None, smallest_tolerable_var=0.0001,
                           include_shuffles=include_shuffles, num_shuffles=num_shuffles,
                           plot_checks=False, verbose=verbose, fit_estimator=True, fig_folder=None)
-
-        if resp_w_t_2 is not None:
+        else:
             # a_cv_results, a_weights_per_cv, _ = decode_trial_type(resp=response_a, neun=neurons_a, tr=trials_a,
             #                                                       resp_other_cond=response_b,
             #                                                       pre_processing_steps=pre_processing_steps)
+            cv_results_at_t, weights_at_t, accuracy_per_shuffle_at_t = decode_trial_type(resp=resp, neun=neun,
+                                                                                         tr=trial_type,
+                                                                                         estimator=None,
+                                                                                         cv_splitter=cv_splitter,
+                                                                                         pre_processing_steps=pre_processing_steps,
+                                                                                         resp_other_cond=resp_2,
+                                                                                         smallest_tolerable_var=0.0001,
+                                                                                         include_shuffles=include_shuffles,
+                                                                                         num_shuffles=num_shuffles,
+                                                                                         plot_checks=False,
+                                                                                         verbose=verbose,
+                                                                                         fit_estimator=True,
+                                                                                         fig_folder=None)
+
             train_a_test_b_accuracy = []
             for estimator in cv_results_at_t['estimator']:
-                b_cv_results_at_t, b_weights_per_cv_at_t, _ = decode_trial_type(resp=resp_2, neun=neun, tr=tr_2,
+                b_cv_results_at_t, b_weights_per_cv_at_t, trian_b_test_a_accuracy_per_shuffle_at_t = decode_trial_type(resp=resp_2, neun=neun, tr=tr_2,
                                                                       estimator=estimator, fit_estimator=False,
-                                                                      resp_other_cond=resp, cv_splitter=cv_splitter,
+                                                                      resp_other_cond=resp, smallest_tolerable_var=0.0001,
+                                                                      cv_splitter=cv_splitter,
+                                                                      include_shuffles=include_shuffles,
+                                                                      num_shuffles=num_shuffles,
                                                                       pre_processing_steps=pre_processing_steps)
                 train_a_test_b_accuracy.append(b_cv_results_at_t['accuracy'])
 
             # TODO: take the average across the estimator...
             accuracy_per_window_2[n_window] = np.mean(train_a_test_b_accuracy)
+            shuffled_accuracy_per_window_2[n_window] = trian_b_test_a_accuracy_per_shuffle_at_t
 
 
         accuracy_per_window[n_window, :] = cv_results_at_t['test_score']
@@ -1252,25 +1274,41 @@ def plot_dprime_vs_weights(visual_dprime, visual_weights, motor_dprime, motor_we
 
 
 def plot_windowed_decoding(v_windowed_decoding_results, m_windowed_decoding_results, custom_xlim=None,
-                           plot_motor_first=False, custom_ylim=None,
+                           plot_motor_first=False, custom_ylim=None, include_accuracy_per_window_2=False,
                            fig=None, axs=None):
 
     if (fig is None) and (axs is None):
         fig, axs = plt.subplots(1, 2, sharex=False, sharey=True)
         fig.set_size_inches(8, 4)
 
-
-    v_mean_accuracy_per_window = np.mean(v_windowed_decoding_results['accuracy_per_window'], axis=1)
-    m_mean_accuracy_per_window = np.mean(m_windowed_decoding_results['accuracy_per_window'], axis=1)
+    if include_accuracy_per_window_2:
+        v_mean_accuracy_per_window = np.mean(v_windowed_decoding_results['accuracy_per_window_2'], axis=1)
+        m_mean_accuracy_per_window = np.mean(m_windowed_decoding_results['accuracy_per_window_2'], axis=1)
+    else:
+        v_mean_accuracy_per_window = np.mean(v_windowed_decoding_results['accuracy_per_window'], axis=1)
+        m_mean_accuracy_per_window = np.mean(m_windowed_decoding_results['accuracy_per_window'], axis=1)
 
     # v_mean_shuffled_accuracy_per_window = np.mean(v_windowed_decoding_results['shuffled_accuracy_per_window'], axis=1)
     # m_mean_shuffled_accuracy_per_window = np.mean(m_windowed_decoding_results['shuffled_accuracy_per_window'], axis=1)
 
-    v_shuffled_upper_percentile_per_window = np.percentile(v_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
-    v_shuffled_lower_percentile_per_window = np.percentile(v_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
+    if include_accuracy_per_window_2:
+        # TODO: include shuffled accuracy per window 2
+        v_shuffled_upper_percentile_per_window = np.percentile(
+            v_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
+        v_shuffled_lower_percentile_per_window = np.percentile(
+            v_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
 
-    m_shuffled_upper_percentile_per_window = np.percentile(m_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
-    m_shuffled_lower_percentile_per_window = np.percentile(m_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
+        m_shuffled_upper_percentile_per_window = np.percentile(
+            m_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
+        m_shuffled_lower_percentile_per_window = np.percentile(
+            m_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
+
+    else:
+        v_shuffled_upper_percentile_per_window = np.percentile(v_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
+        v_shuffled_lower_percentile_per_window = np.percentile(v_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
+
+        m_shuffled_upper_percentile_per_window = np.percentile(m_windowed_decoding_results['shuffled_accuracy_per_window'], 95, axis=1)
+        m_shuffled_lower_percentile_per_window = np.percentile(m_windowed_decoding_results['shuffled_accuracy_per_window'], 5, axis=1)
 
 
     if plot_motor_first:
@@ -1756,7 +1794,7 @@ def main():
                            'cal_amp_difference', 'plot_amp_difference', 'cal_trial_angles',
                            'cal_trial_angles_train_test']
 
-    processes_to_run = ['do_windowed_decoding']
+    processes_to_run = ['plot_a_evaluate_on_a_and_b_results']
 
     process_params = {
         'test_load_data': dict(
@@ -1838,10 +1876,12 @@ def main():
             include_legend_labels=False,
             metric='accuracy_rel_baseline',  # accuracy or accuracy_rel_baseline (use accuracy if decode_onset=True)
             highlight_rec_name='_SS044_2015-04-28',
+            exp_ids_to_exclude=['_SS045_2015-05-04', '_SS045_2015-05-05'],  # ['_SS045_2015-05-04', '_SS045_2015-05-05'
             decoder_ordering_idx=np.array([1, 0, 2, 3]),  # show motor first, then visual
-            custom_y_ticks=[-0.5, 0, 1.0],
+            custom_y_ticks=None, # [-0.5, 0, 1.0],
             fig_ext=['.png', '.svg'],
             svg_text_as_path=False,
+            use_windowed_decoding_data=False,
         ),
         'cal_amp_difference': dict(
             data_repo='/Users/timothysit/neurCorrEyeMove/decodingData/',
@@ -1885,15 +1925,17 @@ def main():
             pre_processing_steps=['exclude_nan_response', 'impute_nan_response', 'zscore_activity',
                                   'remove_zero_variance_neurons'],
             decoding_window_width=0.1,
+            fixed_decoding_bins=np.arange(-2, 2.01, 0.1),
             decode_onset=False,
             include_v_m_and_m_v_model=True,
         ),
         'plot_windowed_decoding': dict(
             data_repo='/Users/timothysit/neurCorrEyeMove/decodingData/',
-            fig_folder='/Users/timothysit/neurCorrEyeMove/figures',
+            fig_folder='/Users/timothysit/neurCorrEyeMove/figures/w_vm_and_mv_decoding',
             save_folder='/Users/timothysit/neurCorrEyeMove/decodingResults',
             decode_onset=False,
             plot_motor_first=True,
+            include_v_m_and_m_v_model=True,
             custom_xlim=[-2, 2],
             custom_ylim=[0, 1.04],
             fig_ext=['.png', '.svg'],
@@ -2505,9 +2547,14 @@ def main():
             highlight_rec_name = process_params[process]['highlight_rec_name']
             decoder_ordering_idx =  process_params[process]['decoder_ordering_idx']
             custom_y_ticks = process_params[process]['custom_y_ticks']
+            use_windowed_decoding_data = process_params[process]['use_windowed_decoding_data']
+            exp_ids_to_exclude = process_params[process]['exp_ids_to_exclude']
 
             xlabels = [r'Vis $\rightarrow$ Vis', r'Mot $\rightarrow$ Mot',
                                                             r'Mot $\rightarrow$ Vis', r'Vis $\rightarrow$ Mot']
+
+
+
             xlabels = np.array(xlabels)[decoder_ordering_idx]
             svg_text_as_path = process_params[process]['svg_text_as_path']
 
@@ -2518,10 +2565,13 @@ def main():
 
             m_resp_ls, m_neun_ls, m_tr_ls, rec_name = load_data(os.path.join(data_repo, 'eyeMovements'), 'motor')
 
-            num_experiments = len(m_resp_ls)
+            rec_name = [x for x in rec_name if x not in exp_ids_to_exclude]
+
+            num_experiments = len(rec_name)
             accuracy_matrix = np.zeros((num_experiments, 4)) + np.nan
 
             print('Number of experiments found %.f' % num_experiments)
+            print('Saving plots to: %s' % fig_folder)
 
             for exp_idx in np.arange(num_experiments):
 
@@ -2532,51 +2582,109 @@ def main():
                 # assert len(visual_accuracy_fpath) == 1
                 # assert len(motor_accuracy_fpath) == 1
 
-                visual_accuracy_fpath = os.path.join(save_folder, '%s%s_visual_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
-                motor_accuracy_fpath = os.path.join(save_folder, '%s%s_motor_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
+                if not use_windowed_decoding_data:
 
-                visual_accuracy = np.load(visual_accuracy_fpath)
-                motor_accuracy = np.load(motor_accuracy_fpath)
+                    visual_accuracy_fpath = os.path.join(save_folder, '%s%s_visual_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
+                    motor_accuracy_fpath = os.path.join(save_folder, '%s%s_motor_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
+
+                    visual_accuracy = np.load(visual_accuracy_fpath)
+                    motor_accuracy = np.load(motor_accuracy_fpath)
 
 
-                # train_visual_test_motor_fpath = glob.glob(os.path.join(save_folder, '%s*train_visual_test_motor_accuracy.npy' % rec_name[exp_idx]))
-                # train_motor_test_visual_fpath = glob.glob(os.path.join(save_folder, '%s*train_motor_test_visual_accuracy.npy' % rec_name[exp_idx]))
+                    # train_visual_test_motor_fpath = glob.glob(os.path.join(save_folder, '%s*train_visual_test_motor_accuracy.npy' % rec_name[exp_idx]))
+                    # train_motor_test_visual_fpath = glob.glob(os.path.join(save_folder, '%s*train_motor_test_visual_accuracy.npy' % rec_name[exp_idx]))
 
-                # assert len(train_visual_test_motor_fpath) == 1
-                # assert len(train_motor_test_visual_fpath) == 1
+                    # assert len(train_visual_test_motor_fpath) == 1
+                    # assert len(train_motor_test_visual_fpath) == 1
 
-                train_visual_test_motor_fpath = os.path.join(save_folder, '%s%s_train_visual_test_motor_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
-                train_motor_test_visual_fpath = os.path.join(save_folder, '%s%s_train_motor_test_visual_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
+                    train_visual_test_motor_fpath = os.path.join(save_folder, '%s%s_train_visual_test_motor_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
+                    train_motor_test_visual_fpath = os.path.join(save_folder, '%s%s_train_motor_test_visual_accuracy.npy' % (rec_name[exp_idx], decode_onset_str))
 
-                train_visual_test_motor_accuracy = np.load(train_visual_test_motor_fpath)
-                train_motor_test_visual_accuracy = np.load(train_motor_test_visual_fpath)
+                    train_visual_test_motor_accuracy = np.load(train_visual_test_motor_fpath)
+                    train_motor_test_visual_accuracy = np.load(train_motor_test_visual_fpath)
+
+                else:
+
+                    visual_accuracy_fpath = os.path.join(save_folder, '%s_v_windowed_decoding_results.npz' % (
+                    rec_name[exp_idx]))
+
+                    motor_accuracy_fpath = os.path.join(save_folder, '%s_m_windowed_decoding_results.npz' % (
+                        rec_name[exp_idx]))
+
+                    train_visual_test_motor_fpath = os.path.join(save_folder, '%s_v_m_windowed_decoding_results.npz' % (rec_name[exp_idx]))
+
+                    train_motor_test_visual_fpath = os.path.join(save_folder, '%s_m_v_windowed_decoding_results.npz' % (rec_name[exp_idx]))
+
+
+                    visual_accuracy_results = np.load(visual_accuracy_fpath)
+                    motor_accuracy_results = np.load(motor_accuracy_fpath)
+                    train_visual_test_motor_accuracy_results = np.load(train_visual_test_motor_fpath)
+                    train_motor_test_visual_accuracy_results = np.load(train_motor_test_visual_fpath)
+
+                    vis_accuracy_per_window = np.mean(visual_accuracy_results['accuracy_per_window'], axis=1)
+                    mot_accuracy_per_window = np.mean(motor_accuracy_results['accuracy_per_window'], axis=1)
+                    train_vis_test_mot_accuracy_per_window = np.mean(train_visual_test_motor_accuracy_results['accuracy_per_window_2'], axis=1)
+                    train_mot_test_vis_accuracy_per_window = np.mean(train_motor_test_visual_accuracy_results['accuracy_per_window_2'], axis=1)
+
+                    vis_accuracy_per_window_shuffled = visual_accuracy_results['shuffled_accuracy_per_window']
+                    mot_accuracy_per_window_shuffled = motor_accuracy_results['shuffled_accuracy_per_window']
+                    train_vis_test_mot_accuracy_per_window_shuffled = train_visual_test_motor_accuracy_results['shuffled_accuracy_per_window']
+                    train_mot_test_vis_accuracy_per_window_shuffled = train_motor_test_visual_accuracy_results['shuffled_accuracy_per_window']
 
                 if metric == 'accuracy':
                     print('Using accuracy as metric')
-                    accuracy_matrix[exp_idx, 0] = np.mean(visual_accuracy)
-                    accuracy_matrix[exp_idx, 1] = np.mean(motor_accuracy)
-                    accuracy_matrix[exp_idx, 2] = np.mean(train_visual_test_motor_accuracy)
-                    accuracy_matrix[exp_idx, 3] = np.mean(train_motor_test_visual_accuracy)
+
+                    if not use_windowed_decoding_data:
+                        accuracy_matrix[exp_idx, 0] = np.mean(visual_accuracy)
+                        accuracy_matrix[exp_idx, 1] = np.mean(motor_accuracy)
+                        accuracy_matrix[exp_idx, 2] = np.mean(train_visual_test_motor_accuracy)
+                        accuracy_matrix[exp_idx, 3] = np.mean(train_motor_test_visual_accuracy)
+                    else:
+                        accuracy_matrix[exp_idx, 0] = np.max(vis_accuracy_per_window)
+                        accuracy_matrix[exp_idx, 1] = np.max(mot_accuracy_per_window)
+                        accuracy_matrix[exp_idx, 2] = np.max(train_vis_test_mot_accuracy_per_window)
+                        accuracy_matrix[exp_idx, 3] = np.max(train_mot_test_vis_accuracy_per_window)
+
                     ylabel = 'Accuracy'
                     ylim = [0, 1.5]
                     yticks = [0, 0.5, 1]
                     ybounds = [0, 1]
 
                 elif metric == 'accuracy_rel_baseline':
-                    motor_decoder_baseline_accuracy_save_name = os.path.join(save_folder, '%s_motor_baseline_accuracy.npy' % rec_name[exp_idx])
-                    visual_decoder_baseline_accuracy_save_name = os.path.join(save_folder, '%s_visual_baseline_accuracy.npy' % rec_name[exp_idx])
-                    train_visual_test_motor_baseline_accuracy_save_name = os.path.join(save_folder, '%s_train_visual_test_motor_baseline_accuracy.npy' % rec_name[exp_idx])
-                    train_motor_test_visual_baseline_accuracy_save_name = os.path.join(save_folder, '%s_train_motor_test_visual_baseline_accuracy.npy' % rec_name[exp_idx])
 
-                    motor_decoder_baseline_accuracy = np.load(motor_decoder_baseline_accuracy_save_name)
-                    visual_decoder_baseline_accuracy = np.load(visual_decoder_baseline_accuracy_save_name)
-                    train_visual_test_motor_baseline_accuracy = np.load(train_visual_test_motor_baseline_accuracy_save_name)
-                    train_motor_test_visual_baseline_accuracy = np.load(train_motor_test_visual_baseline_accuracy_save_name)
+                    if not use_windowed_decoding_data:
+                        motor_decoder_baseline_accuracy_save_name = os.path.join(save_folder, '%s_motor_baseline_accuracy.npy' % rec_name[exp_idx])
+                        visual_decoder_baseline_accuracy_save_name = os.path.join(save_folder, '%s_visual_baseline_accuracy.npy' % rec_name[exp_idx])
+                        train_visual_test_motor_baseline_accuracy_save_name = os.path.join(save_folder, '%s_train_visual_test_motor_baseline_accuracy.npy' % rec_name[exp_idx])
+                        train_motor_test_visual_baseline_accuracy_save_name = os.path.join(save_folder, '%s_train_motor_test_visual_baseline_accuracy.npy' % rec_name[exp_idx])
 
-                    accuracy_matrix[exp_idx, 0] = (np.mean(visual_accuracy) - visual_decoder_baseline_accuracy) / (1 - visual_decoder_baseline_accuracy)
-                    accuracy_matrix[exp_idx, 1] = (np.mean(motor_accuracy) - motor_decoder_baseline_accuracy) / (1 - motor_decoder_baseline_accuracy)
-                    accuracy_matrix[exp_idx, 2] = (np.mean(train_visual_test_motor_accuracy) - train_visual_test_motor_baseline_accuracy) / (1 - train_visual_test_motor_baseline_accuracy)
-                    accuracy_matrix[exp_idx, 3] = (np.mean(train_motor_test_visual_accuracy) - train_motor_test_visual_baseline_accuracy) / (1 - train_motor_test_visual_baseline_accuracy)
+                        motor_decoder_baseline_accuracy = np.load(motor_decoder_baseline_accuracy_save_name)
+                        visual_decoder_baseline_accuracy = np.load(visual_decoder_baseline_accuracy_save_name)
+                        train_visual_test_motor_baseline_accuracy = np.load(train_visual_test_motor_baseline_accuracy_save_name)
+                        train_motor_test_visual_baseline_accuracy = np.load(train_motor_test_visual_baseline_accuracy_save_name)
+
+                        accuracy_matrix[exp_idx, 0] = (np.mean(visual_accuracy) - visual_decoder_baseline_accuracy) / (1 - visual_decoder_baseline_accuracy)
+                        accuracy_matrix[exp_idx, 1] = (np.mean(motor_accuracy) - motor_decoder_baseline_accuracy) / (1 - motor_decoder_baseline_accuracy)
+                        accuracy_matrix[exp_idx, 2] = (np.mean(train_visual_test_motor_accuracy) - train_visual_test_motor_baseline_accuracy) / (1 - train_visual_test_motor_baseline_accuracy)
+                        accuracy_matrix[exp_idx, 3] = (np.mean(train_motor_test_visual_accuracy) - train_motor_test_visual_baseline_accuracy) / (1 - train_motor_test_visual_baseline_accuracy)
+
+                    else:
+                        vis_baseline_per_window = np.mean(vis_accuracy_per_window_shuffled, axis=1)
+                        vis_metric_per_window =  (vis_accuracy_per_window - vis_baseline_per_window) / (1 - vis_baseline_per_window)
+
+                        mot_baseline_per_window = np.mean(mot_accuracy_per_window_shuffled, axis=1)
+                        mot_metric_per_window = (mot_accuracy_per_window - mot_baseline_per_window) / (1 - mot_baseline_per_window)
+
+                        train_vis_test_mot_baseline_per_window = np.mean(train_vis_test_mot_accuracy_per_window_shuffled, axis=1)
+                        train_vis_test_mot_metric_per_window = (train_vis_test_mot_accuracy_per_window - train_vis_test_mot_baseline_per_window) / (1 - train_vis_test_mot_baseline_per_window)
+
+                        train_mot_test_vis_baseline_per_window = np.mean(train_mot_test_vis_accuracy_per_window_shuffled, axis=1)
+                        train_mot_test_vis_metric_per_window = (train_mot_test_vis_accuracy_per_window - train_mot_test_vis_baseline_per_window) / (1 - train_mot_test_vis_baseline_per_window)
+
+                        accuracy_matrix[exp_idx, 0] = np.max(vis_metric_per_window)
+                        accuracy_matrix[exp_idx, 1] = np.max(mot_metric_per_window)
+                        accuracy_matrix[exp_idx, 2] = np.max(train_vis_test_mot_metric_per_window)
+                        accuracy_matrix[exp_idx, 3] = np.max(train_mot_test_vis_metric_per_window)
 
                     ylim = [-0.5, 1.5]
                     ylabel = '(Accuracy - baseline) / (1 - baseline)'
@@ -2589,7 +2697,6 @@ def main():
             if highlight_rec_name is not None:
                 highlight_index = np.where(np.array(rec_name) == highlight_rec_name)[0][0]
 
-            pdb.set_trace()
             with plt.style.context(splstyle.get_style('nature-reviews')):
                 fig, ax = plot_accuracy_of_decoders(accuracy_matrix=accuracy_matrix,
                                                     legend_labels=rec_name,
@@ -2601,6 +2708,9 @@ def main():
                                                     )
 
                 fig_name = '%strain_vis_test_mot_and_vv_%s' % (decode_onset_str, metric)
+
+                if use_windowed_decoding_data:
+                    fig_name += '_w_windowed_decoding'
 
                 for ext in fig_ext:
 
@@ -2882,6 +2992,8 @@ def main():
             save_folder =  process_params[process]['save_folder']
             decode_onset = process_params[process]['decode_onset']
             pre_processing_steps = process_params[process]['pre_processing_steps']
+            include_v_m_and_m_v_model = process_params[process]['include_v_m_and_m_v_model']
+            fixed_decoding_bins = process_params[process]['fixed_decoding_bins']
 
             m_resp_ls, m_neun_ls, m_tr_ls, m_rec_name, m_resp_t_ls, m_aligned_time = load_data(
                 os.path.join(data_repo, process_params[process]['eyeMovementSubFolder']), 'motor_w_time')
@@ -2891,7 +3003,7 @@ def main():
 
             verbose = True
 
-            for n_recording in np.arange(len(m_rec_name)):
+            for n_recording in np.arange(1, len(m_rec_name)):  # TODO: temp here to start at 1, remove after being done!
                 rec_name = m_rec_name[n_recording]
 
                 m_resp_w_time = m_resp_t_ls[n_recording]  # time x trial x neuron
@@ -2905,32 +3017,36 @@ def main():
                 v_neun = v_neun_ls[n_recording].flatten()
                 m_neun = m_neun_ls[n_recording].flatten()
 
-                fixed_decoding_bins = np.arange(-2, 2.01, 0.1)
-
-                """
                 v_windowed_decoding_results = window_decoding(resp_w_t=v_resp_w_time,
                                                    neun=v_neun, tr=v_trial_types, aligned_time=v_aligned_time,
                                                    verbose=verbose, decode_onset=decode_onset,
-                                                   pre_processing_steps=pre_processing_steps)
+                                                   pre_processing_steps=pre_processing_steps,
+                                                   fixed_decoding_bins=fixed_decoding_bins)
                 m_windowed_decoding_results = window_decoding(resp_w_t=m_resp_w_time,
                                                    neun=m_neun, tr=m_trial_types, aligned_time=m_aligned_time,
                                                    verbose=verbose, decode_onset=decode_onset,
-                                                   pre_processing_steps=pre_processing_steps)
-                """
+                                                   pre_processing_steps=pre_processing_steps,
+                                                   fixed_decoding_bins=fixed_decoding_bins)
 
-                # Make custom decoding window bins from -2 to 2 seconds aligned
-
-
-                v_m_windowed_decoding_results = window_decoding(resp_w_t=v_resp_w_time,
+                if include_v_m_and_m_v_model:
+                    v_m_windowed_decoding_results = window_decoding(resp_w_t=v_resp_w_time,
                                                    neun=v_neun, tr=v_trial_types,
                                                    resp_w_t_2=m_resp_w_time,
                                                    tr_2=m_trial_types,
                                                    aligned_time=v_aligned_time,
                                                    aligned_time_2=m_aligned_time,
                                                    verbose=verbose, decode_onset=decode_onset,
-                                                   pre_processing_steps=pre_processing_steps)
-
-                pdb.set_trace()
+                                                   pre_processing_steps=pre_processing_steps,
+                                                   fixed_decoding_bins=fixed_decoding_bins)
+                    m_v_windowed_decoding_results = window_decoding(resp_w_t=m_resp_w_time,
+                                                                    neun=m_neun, tr=m_trial_types,
+                                                                    resp_w_t_2=v_resp_w_time,
+                                                                    tr_2=v_trial_types,
+                                                                    aligned_time=m_aligned_time,
+                                                                    aligned_time_2=v_aligned_time,
+                                                                    verbose=verbose, decode_onset=decode_onset,
+                                                                    pre_processing_steps=pre_processing_steps,
+                                                                    fixed_decoding_bins=fixed_decoding_bins)
 
                 if decode_onset:
                     v_save_path = os.path.join(save_folder, '%s_v_windowed_decoding_onset_results.npz' % rec_name)
@@ -2939,8 +3055,17 @@ def main():
                     v_save_path = os.path.join(save_folder, '%s_v_windowed_decoding_results.npz' % rec_name)
                     m_save_path = os.path.join(save_folder, '%s_m_windowed_decoding_results.npz' % rec_name)
 
+                    if include_v_m_and_m_v_model:
+                        v_m_save_path = os.path.join(save_folder, '%s_v_m_windowed_decoding_results.npz' % rec_name)
+                        m_v_save_path = os.path.join(save_folder, '%s_m_v_windowed_decoding_results.npz' % rec_name)
+
                 np.savez(v_save_path, **v_windowed_decoding_results)
                 np.savez(m_save_path, **m_windowed_decoding_results)
+
+                if include_v_m_and_m_v_model:
+                    np.savez(v_m_save_path, **v_m_windowed_decoding_results)
+                    np.savez(m_v_save_path, **m_v_windowed_decoding_results)
+
                 print('Saved windowed decoding results for %s in %s' % (rec_name, save_folder))
 
 
@@ -2952,6 +3077,10 @@ def main():
             fig_ext = process_params[process]['fig_ext']
             decode_onset = process_params[process]['decode_onset']
             plot_motor_first = process_params[process]['plot_motor_first']
+            include_v_m_and_m_v_model = process_params[process]['include_v_m_and_m_v_model']
+
+            if not os.path.isdir(fig_folder):
+                os.makedirs(fig_folder)
 
             m_resp_ls, m_neun_ls, m_tr_ls, m_rec_name, m_resp_t_ls, m_aligned_time = load_data(
                 os.path.join(data_repo, 'eyeMovements'), 'motor_w_time')
@@ -2975,7 +3104,11 @@ def main():
                 v_windowed_decoding_results = np.load(v_save_path)
                 m_windowed_decoding_results = np.load(m_save_path)
 
-
+                if include_v_m_and_m_v_model:
+                    v_m_save_path = os.path.join(save_folder, '%s_v_m_windowed_decoding_results.npz' % rec_name)
+                    m_v_save_path = os.path.join(save_folder, '%s_m_v_windowed_decoding_results.npz' % rec_name)
+                    v_m_windowed_decoding_results = np.load(v_m_save_path)
+                    m_v_windowed_decoding_results = np.load(m_v_save_path)
 
                 for ext in fig_ext:
 
@@ -2992,6 +3125,25 @@ def main():
                         plt.rcParams['svg.fonttype'] = 'none'
 
                         fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
+
+                    if include_v_m_and_m_v_model:
+                        with plt.style.context(splstyle.get_style('nature-reviews')):
+                            fig, axs = plot_windowed_decoding(v_m_windowed_decoding_results, m_v_windowed_decoding_results,
+                                                              custom_xlim=process_params[process]['custom_xlim'],
+                                                              custom_ylim=process_params[process]['custom_ylim'],
+                                                              plot_motor_first=plot_motor_first, include_accuracy_per_window_2=True,
+                                                              fig=None, axs=None)
+
+                            axs[0].set_title(r'$v \rightarrow m$', size=11)
+                            axs[1].set_title(r'$m \rightarrow v$', size=11)
+
+                            fig.suptitle('%s' % rec_name)
+                            fig.tight_layout()
+
+                            # save font as text rather than paths
+                            plt.rcParams['svg.fonttype'] = 'none'
+                            fig_name = '%s_v_m_and_m_v_windowed_decoding_accuracy' % rec_name
+                            fig.savefig(os.path.join(fig_folder, fig_name + ext), dpi=300, bbox_inches='tight')
 
         if process == 'cal_trial_angles':
 
