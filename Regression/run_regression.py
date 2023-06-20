@@ -3108,7 +3108,7 @@ def main():
                            'compare_ev_with_shuffled']
 
 
-    processes_to_run = ['plot_kernel_fit_raster']
+    processes_to_run = ['plot_kernel_scatter']
     process_params = {
         'load_data': dict(
             data_folder='/Volumes/Macintosh HD/Users/timothysit/SCmotVisCoding/Data/InteractionSacc_Vis/New',
@@ -3156,13 +3156,13 @@ def main():
                                 ],
             exp_ids=[
                      'SS041_2015-04-23',
-                     # 'SS044_2015-04-28',
-                     # 'SS045_2015-05-04',
-                     # 'SS045_2015-05-05',
-                     # 'SS047_2015-11-23',
-                     # 'SS047_2015-12-03',
-                     # 'SS048_2015-11-09',
-                     # 'SS048_2015-12-02'
+                     'SS044_2015-04-28',
+                     'SS045_2015-05-04',
+                     'SS045_2015-05-05',
+                     'SS047_2015-11-23',
+                     'SS047_2015-12-03',
+                     'SS048_2015-11-09',
+                     'SS048_2015-12-02'
                     ],
             X_sets_to_compare={
                                'bias_only': ['bias'],
